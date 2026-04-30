@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package generated;
+
+option go_package = "/master/generated/";
+
+service WorkerService {
+  rpc Handle (Request) returns (Response);
+}
+
+message Request {
+  string request_id = 1;
+  string message = 2;
+  int32 priority = 3;
+}
+
+message Response {
+  string reply = 1;
+  int32 queue_length = 2;
+}
