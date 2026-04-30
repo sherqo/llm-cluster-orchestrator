@@ -26,13 +26,14 @@ install-worker:
 
 generate-proto: generate-proto-go generate-proto-python
 
-generate-proto-go:
+generate-proto-go: install-master
 	mkdir -p master/generated 
 	protoc --go_out=. --go-grpc_out=. $(PROTO_FILES)
 
-generate-proto-python:
+generate-proto-python: install-worker
 	mkdir -p worker/generated
-	python -m grpc_tools.protoc -I proto --python_out=worker/generated --grpc_python_out=worker/generated proto/worker.proto
+	touch worker/generated/__init__.py
+	python -m grpc_tools.protoc -I proto --python_out=worker/ --grpc_python_out=worker/ proto/worker.proto
 
 # ---------- CLEAN ----------
 .PHONY: clean
