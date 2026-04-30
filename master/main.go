@@ -5,26 +5,37 @@
 package main
 
 import (
-	"fmt"
-	"net/http"
+	"context"
+	"log"
+	"time"
+
+	pb "master/generated" // adjust this
+
+	"google.golang.org/grpc"
 )
 
-func chat(w http.ResponseWriter, req *http.Request) {
-    fmt.Fprintf(w, "chat\n")
-}
-
-func headers(w http.ResponseWriter, req *http.Request) {
-
-    for name, headers := range req.Header {
-        for _, h := range headers {
-            fmt.Fprintf(w, "%v: %v\n", name, h)
-        }
-    }
-}
-
 func main() {
+	conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure())
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer conn.Close()
 
-    http.HandleFunc("/chat", chat)
+	client := pb.NewWorkerServiceClient(conn)
 
-    http.ListenAndServe(":8090", nil)
-} // from config.go file
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
+	defer cancel()
+
+	resp, err := client.Handle(ctx, &pb.Request{
+		RequestId: "1",
+		Message:   "hello from LB",
+		Priority:  1,
+	})
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println("reply:", resp.Reply)
+	log.Println("queue:", resp.QueueLength)
+}
