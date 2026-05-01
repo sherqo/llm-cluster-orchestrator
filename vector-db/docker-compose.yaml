@@ -14,4 +14,4 @@ services:
 
     volumes:
       - ./chroma-data:/data/db
-      - ./documents:/data/docs
+      - ./docs:/data/docs
