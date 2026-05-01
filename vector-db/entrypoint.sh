@@ -17,7 +17,11 @@ else
 fi
 
 echo "Testing DB with sample query..."
-python /app/scripts/query.py --query "france" -k 3
+if python /app/scripts/query.py --query "france" -k 3; then
+    echo "Sample query completed successfully"
+else
+    echo "Sample query failed; continuing startup"
+fi
 
 echo "Starting Chroma server..."
 
