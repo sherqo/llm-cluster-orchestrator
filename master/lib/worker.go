@@ -30,12 +30,12 @@ func NewWorker(addr string) *Worker {
 	}
 }
 
-func (w *Worker) Send(ctx context.Context, req ChatRequest) (string, error) {
+func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	resp, err := w.client.Handle(ctx, &pb.Request{
-		RequestId: req.UserID,
+		RequestId: requestID,
 		Message:   req.Prompt,
 		Priority:  tierToPriority(req.Tier),
 	})
