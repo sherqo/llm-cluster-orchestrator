@@ -19,11 +19,7 @@ if os.path.exists(DB_PATH):
 
 os.makedirs(DB_PATH, exist_ok=True)
 
-client = chromadb.Client(
-    Settings(
-        persist_directory=DB_PATH
-    )
-)
+client = chromadb.PersistentClient(path=DB_PATH)
 
 collection = client.get_or_create_collection("documents")
 
