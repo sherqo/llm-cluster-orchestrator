@@ -1,41 +1,30 @@
 /*
 * The LB should listen to http in some port and then should try to response for it
- */
+* the request flow should be:
+  * client calls the LB via HTTP
+	* the LB should assign an id to this request and push the request to the DB non-blockingly
+	* then the LB should figure out what worker node withh take this request
+	* then it should add this info to the in-memory registry (worker, reqeustId)
+	* the assigned worker node should finish the work and send back to the LB
+	* the LB then needs to figure out how to send it back via the requestId and also save the response to the DB
+	* and remove the requestId from the in-memory registry
+
+* the previous flow is for the normal case, but we also need to consider the failure cases:
+*/
 
 package main
 
 import (
-	"context"
-	"log"
-	"time"
-
-	pb "master/generated" // adjust this
-
-	"google.golang.org/grpc"
+	lib "master/lib"
 )
 
 func main() {
-	conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure())
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer conn.Close()
+	router := lib.NewRouter() // create new LB and add routers to it
 
-	client := pb.NewWorkerServiceClient(conn)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
-	defer cancel()
-
-	resp, err := client.Handle(ctx, &pb.Request{
-		RequestId: "1",
-		Message:   "hello from LB",
-		Priority:  1,
-	})
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Println("reply:", resp.Reply)
-	log.Println("queue:", resp.QueueLength)
+	// manually for now 
+	router.AddWorker("localhost:50051")
+	router.AddWorker("localhost:50052")
+	router.AddWorker("localhost:50053")
+	
+	lib.Serve(router)
 }

@@ -15,7 +15,7 @@ class Worker(worker_pb2_grpc.WorkerServiceServicer):
         print("received:", request.message)
 
         return worker_pb2.Response(
-            reply="processed: " + request.message,
+            reply="hello from the worker, you told me: " + request.message,
             queue_length=1,
         )
 
