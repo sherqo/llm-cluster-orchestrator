@@ -11,7 +11,8 @@ services:
       INITIALIZE: "true"
       CHROMA_DB_PATH: "/data/db"
       DOCS_PATH: "/data/docs"
+      COLLECTION_NAME: "documents"
 
     volumes:
       - ./chroma-data:/data/db
-      - ./docs:/data/docs
+      - ./embedded-docs:/data/docs

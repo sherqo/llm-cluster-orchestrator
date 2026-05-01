@@ -6,13 +6,14 @@ from chromadb.config import Settings
 
 def connect():
     db_path = os.getenv("CHROMA_DB_PATH", "/data/db")
+    collection_name = os.getenv("COLLECTION_NAME", "documents")
 
     client = chromadb.PersistentClient(
         path=db_path,
         settings=Settings(anonymized_telemetry=False)
     )
 
-    return client
+    return client, collection_name
 
 
 def query(collection, text, k):
@@ -56,8 +57,8 @@ def main():
 
     args = parser.parse_args()
 
-    client = connect()
-    collection = client.get_collection("documents")
+    client, collection_name = connect()
+    collection = client.get_collection(collection_name)
 
     results = query(collection, args.query, args.k)
 
