@@ -14,7 +14,11 @@ documents = []
 ids = []
 
 for file in os.listdir(DOCS_PATH):
-    with open(os.path.join(DOCS_PATH, file), "r") as f:
+    file_path = os.path.join(DOCS_PATH, file)
+    if not os.path.isfile(file_path):
+        continue
+
+    with open(file_path, "r", encoding="utf-8") as f:
         print(f"loading document: {file.split('.')[0]}")
         documents.append(f.read())
         ids.append(file)
