@@ -7,6 +7,7 @@ echo "Container starting..."
 if [ "$INITIALIZE" = "true" ]; then
     echo "INITIALIZE=true detected"
     echo "Clearing existing database files..."
+    mkdir -p /data/db
     rm -rf /data/db/*
     echo "Running database initialization..."
     python /app/scripts/init_db.py

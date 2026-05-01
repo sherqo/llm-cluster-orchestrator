@@ -14,6 +14,8 @@ documents = []
 ids = []
 
 for file in os.listdir(DOCS_PATH):
+    if not (file.endswith(".md") or file.endswith(".txt")):
+        continue
     file_path = os.path.join(DOCS_PATH, file)
     if not os.path.isfile(file_path):
         continue
