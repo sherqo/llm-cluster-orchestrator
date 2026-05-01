@@ -1,0 +1,18 @@
+version: "3.9"
+
+services:
+  chroma:
+    build: .
+
+    ports:
+      - "8000:8000"
+
+    environment:
+      INITIALIZE: "true"
+      CHROMA_DB_PATH: "/data/db"
+      DOCS_PATH: "/data/docs"
+      COLLECTION_NAME: "documents"
+
+    volumes:
+      - ./chroma-data:/data/db
+      - ./embedded-docs:/data/docs
