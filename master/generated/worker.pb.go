@@ -83,8 +83,10 @@ func (x *Request) GetPriority() int32 {
 
 type Response struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Reply         string                 `protobuf:"bytes,1,opt,name=reply,proto3" json:"reply,omitempty"`
-	QueueLength   int32                  `protobuf:"varint,2,opt,name=queue_length,json=queueLength,proto3" json:"queue_length,omitempty"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	Reply         string                 `protobuf:"bytes,2,opt,name=reply,proto3" json:"reply,omitempty"`
+	QueueLength   int32                  `protobuf:"varint,3,opt,name=queue_length,json=queueLength,proto3" json:"queue_length,omitempty"`
+	Retries       int32                  `protobuf:"varint,4,opt,name=retries,proto3" json:"retries,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -119,6 +121,13 @@ func (*Response) Descriptor() ([]byte, []int) {
 	return file_proto_worker_proto_rawDescGZIP(), []int{1}
 }
 
+func (x *Response) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
 func (x *Response) GetReply() string {
 	if x != nil {
 		return x.Reply
@@ -133,6 +142,13 @@ func (x *Response) GetQueueLength() int32 {
 	return 0
 }
 
+func (x *Response) GetRetries() int32 {
+	if x != nil {
+		return x.Retries
+	}
+	return 0
+}
+
 var File_proto_worker_proto protoreflect.FileDescriptor
 
 const file_proto_worker_proto_rawDesc = "" +
@@ -142,10 +158,13 @@ const file_proto_worker_proto_rawDesc = "" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x1a\n" +
-	"\bpriority\x18\x03 \x01(\x05R\bpriority\"C\n" +
-	"\bResponse\x12\x14\n" +
-	"\x05reply\x18\x01 \x01(\tR\x05reply\x12!\n" +
-	"\fqueue_length\x18\x02 \x01(\x05R\vqueueLength2B\n" +
+	"\bpriority\x18\x03 \x01(\x05R\bpriority\"|\n" +
+	"\bResponse\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x14\n" +
+	"\x05reply\x18\x02 \x01(\tR\x05reply\x12!\n" +
+	"\fqueue_length\x18\x03 \x01(\x05R\vqueueLength\x12\x18\n" +
+	"\aretries\x18\x04 \x01(\x05R\aretries2B\n" +
 	"\rWorkerService\x121\n" +
 	"\x06Handle\x12\x12.generated.Request\x1a\x13.generated.ResponseB\x14Z\x12/master/generated/b\x06proto3"
 

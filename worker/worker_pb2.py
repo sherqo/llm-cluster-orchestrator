@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cworker.proto\x12\tgenerated\"@\n\x07Request\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\x10\n\x08priority\x18\x03 \x01(\x05\"/\n\x08Response\x12\r\n\x05reply\x18\x01 \x01(\t\x12\x14\n\x0cqueue_length\x18\x02 \x01(\x05\x32\x42\n\rWorkerService\x12\x31\n\x06Handle\x12\x12.generated.Request\x1a\x13.generated.ResponseB\x14Z\x12/master/generated/b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cworker.proto\x12\tgenerated\"@\n\x07Request\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\x10\n\x08priority\x18\x03 \x01(\x05\"T\n\x08Response\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\r\n\x05reply\x18\x02 \x01(\t\x12\x14\n\x0cqueue_length\x18\x03 \x01(\x05\x12\x0f\n\x07retries\x18\x04 \x01(\x05\x32\x42\n\rWorkerService\x12\x31\n\x06Handle\x12\x12.generated.Request\x1a\x13.generated.ResponseB\x14Z\x12/master/generated/b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,7 +35,7 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_REQUEST']._serialized_start=27
   _globals['_REQUEST']._serialized_end=91
   _globals['_RESPONSE']._serialized_start=93
-  _globals['_RESPONSE']._serialized_end=140
-  _globals['_WORKERSERVICE']._serialized_start=142
-  _globals['_WORKERSERVICE']._serialized_end=208
+  _globals['_RESPONSE']._serialized_end=177
+  _globals['_WORKERSERVICE']._serialized_start=179
+  _globals['_WORKERSERVICE']._serialized_end=245
 # @@protoc_insertion_point(module_scope)

@@ -15,6 +15,8 @@ message Request {
 }
 
 message Response {
-  string reply = 1;
-  int32 queue_length = 2;
+  string request_id = 1;
+  string reply = 2;
+  int32 queue_length = 3;
+  int32 retries = 4;
 }
