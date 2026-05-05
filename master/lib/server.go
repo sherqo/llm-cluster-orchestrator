@@ -2,6 +2,7 @@ package lib
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 
@@ -43,41 +44,34 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router) 
 
 	Verbose("server", "received chat request, userId="+req.UserID+", tier="+req.Tier)
 
-	worker, err := router.Pick(req)
-	if err != nil {
-		Verbose("server", "no workers available")
-		http.Error(w, "no workers available", http.StatusServiceUnavailable)
-		return
-	}
-
-	Verbose("server", "picked worker="+worker.addr)
-
+	// generate a unique request ID 
 	requestID, err := uuid.NewV7()
 	if err != nil {
-		Verbose("server", "failed to generate UUID: "+err.Error())
+		Verbose("server", "failed to generate request id: "+err.Error())
 		http.Error(w, "failed to assign request id", http.StatusInternalServerError)
 		return
 	}
-
 	requestIDStr := requestID.String()
 	Verbose("server", "assigned requestId="+requestIDStr)
 
-	router.AddInFlight(requestIDStr, worker.addr)
-	defer router.RemoveInFlight(requestIDStr)
-	Verbose("server", "added in-flight: reqId="+requestIDStr+" worker="+worker.addr)
-
-	reply, err := worker.Send(r.Context(), requestIDStr, req)
+	resp, err := router.HandleChat(r.Context(), requestIDStr, req)
 	if err != nil {
-		Verbose("server", "worker failed: "+err.Error())
-		http.Error(w, "worker failed: "+err.Error(), http.StatusBadGateway)
+		switch {
+		case errors.Is(err, ErrNoWorkersAvailable):
+			Verbose("server", "no workers available")
+			http.Error(w, "no workers available", http.StatusServiceUnavailable)
+		case errors.Is(err, ErrWorkerFailed):
+			Verbose("server", err.Error())
+			http.Error(w, err.Error(), http.StatusBadGateway)
+		default:
+			Verbose("server", err.Error())
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
 		return
 	}
 
-	Verbose("server", "request completed, reqId="+requestIDStr+" reply="+reply)
+	Verbose("server", "request completed, reqId="+resp.RequestID+" reply="+resp.Reply)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(ChatResponse{
-		RequestID: requestIDStr,
-		Reply:     reply,
-	})
+	json.NewEncoder(w).Encode(resp)
 }

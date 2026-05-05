@@ -1,10 +1,15 @@
 package lib
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
+
+var ErrNoWorkersAvailable = errors.New("no workers available")
+var ErrWorkerFailed = errors.New("worker failed")
 
 type Router struct {
 	workers map[string]*Worker
@@ -60,10 +65,30 @@ func (r *Router) Pick(req ChatRequest) (*Worker, error) {
 	}
 
 	if best == nil {
-		return nil, errors.New("no routable workers available")
+		return nil, ErrNoWorkersAvailable
 	}
 
 	return best, nil
+}
+
+func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatRequest) (ChatResponse, error) {
+	worker, err := r.Pick(req)
+	if err != nil {
+		return ChatResponse{}, err
+	}
+
+	r.AddInFlight(requestID, worker.addr)
+	defer r.RemoveInFlight(requestID)
+
+	reply, err := worker.Send(ctx, requestID, req)
+	if err != nil {
+		return ChatResponse{}, fmt.Errorf("%w: %v", ErrWorkerFailed, err)
+	}
+
+	return ChatResponse{
+		RequestID: requestID,
+		Reply:     reply,
+	}, nil
 }
 
 func (r *Router) StartCircuitRecoveryLoop() {
