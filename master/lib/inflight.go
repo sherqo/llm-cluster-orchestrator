@@ -2,6 +2,14 @@ package lib
 
 import "time"
 
+// struct to track in-flight requests (is not needed for the application logic, but can be useful for monitoring and debugging)
+type InFlight struct {
+	RequestID string
+	Worker    string
+	StartedAt time.Time
+}
+
+
 // in-flight request tracking methods (not strictly necessary, but can be useful for monitoring and debugging)
 func (r *Router) AddInFlight(requestID string, workerAddr string) {
 	r.inFlightM.Lock()

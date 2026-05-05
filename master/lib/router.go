@@ -24,13 +24,6 @@ type Router struct {
 	inFlightM sync.RWMutex
 }
 
-// struct to track in-flight requests (is not needed for the application logic, but can be useful for monitoring and debugging)
-type InFlight struct {
-	RequestID string
-	Worker    string
-	StartedAt time.Time
-}
-
 // router methods
 
 func NewRouter() *Router { // constructor
