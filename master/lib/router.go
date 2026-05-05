@@ -15,21 +15,30 @@ import (
 var ErrNoWorkersAvailable = errors.New("no workers available")
 var ErrWorkerFailed = errors.New("worker failed")
 
+const (
+	StrategyLeastConnections  = "least_connections"
+	StrategyWeightedLeastLoad = "weighted_least_load"
+)
+
 // main router struct 
 type Router struct {
-	workers map[string]*Worker // map of workers
+	workers map[string]*Worker
 	workersM sync.RWMutex
 
 	inFlight  map[string]InFlight
 	inFlightM sync.RWMutex
+
+	strategy   string
+	strategyM sync.RWMutex
 }
 
 // router methods
 
-func NewRouter() *Router { // constructor
+func NewRouter() *Router {
 	return &Router{
 		workers:  make(map[string]*Worker),
 		inFlight: make(map[string]InFlight),
+		strategy: StrategyLeastConnections,
 	}
 }
 
@@ -44,32 +53,6 @@ func (r *Router) AddWorker(addr string) {
 		return
 	}
 	r.workers[id] = w
-}
-
-func (r *Router) PickWorker(req ChatRequest) (*Worker, error) {
-	r.workersM.RLock()
-	defer r.workersM.RUnlock()
-
-	var best *Worker
-	var bestScore float64
-
-	for _, worker := range r.workers {
-		if !worker.isRoutable() {
-			continue
-		}
-
-		score := worker.loadScore()
-		if best == nil || score < bestScore {
-			best = worker
-			bestScore = score
-		}
-	}
-
-	if best == nil {
-		return nil, ErrNoWorkersAvailable
-	}
-
-	return best, nil
 }
 
 func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatRequest) (ChatResponse, error) {

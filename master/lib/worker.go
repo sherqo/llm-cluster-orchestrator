@@ -37,7 +37,7 @@ type Worker struct {
 	addr   string // address of the worker server, eg: "localhost:50051"
 	weight float64 // weight for load balancing, higher means more requests will be routed to this worker
 
-	activeRequests int64
+	activeRequests atomic.Int64
 
 	status       WorkerStatus
 	circuitState CircuitState
@@ -100,8 +100,8 @@ func NewWorker(id, addr string, weight float64) (*Worker, error) {
 
 // method to send a request to the worker and get a response
 func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (string, error) {
-	atomic.AddInt64(&w.activeRequests, 1)
-	defer atomic.AddInt64(&w.activeRequests, -1)
+	w.activeRequests.Add(1)
+	defer w.activeRequests.Add(-1)
 	
 	//TODO: the timeout should be tier aware so pro get longer timouts than free users
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -126,7 +126,7 @@ func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (s
 
 // idk about this 
 func (w *Worker) loadScore() float64 {
-	active := atomic.LoadInt64(&w.activeRequests)
+	active := w.activeRequests.Load()
 
 	w.mu.RLock()
 	weight := w.weight
@@ -147,7 +147,7 @@ func (w *Worker) isRoutable() bool {
 	case CircuitClosed:
 		return true
 	case CircuitHalfOpen:
-		return atomic.LoadInt64(&w.activeRequests) == 0
+		return w.activeRequests.Load() == 0
 	default:
 		return false
 	}
@@ -190,21 +190,11 @@ func (w *Worker) recordFailure() {
 	}
 }
 
-func (w *Worker) IsAvailable() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+func (w *Worker) IsHealthy() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 
-	w.maybeHalfOpen()
-
-	if w.status != WorkerHealthy {
-		return false
-	}
-
-	if w.circuitState == CircuitOpen {
-		return false
-	}
-
-	return true
+	return w.status == WorkerHealthy
 }
 
 
