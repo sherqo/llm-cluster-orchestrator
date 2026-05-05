@@ -33,7 +33,7 @@ type InFlight struct {
 
 // router methods
 
-func NewRouter() *Router {
+func NewRouter() *Router { // constructor
 	return &Router{
 		workers:  make(map[string]*Worker),
 		inFlight: make(map[string]InFlight),
@@ -53,7 +53,7 @@ func (r *Router) AddWorker(addr string) {
 	r.workers[id] = w
 }
 
-func (r *Router) Pick(req ChatRequest) (*Worker, error) {
+func (r *Router) PickWorker(req ChatRequest) (*Worker, error) {
 	r.workersM.RLock()
 	defer r.workersM.RUnlock()
 
@@ -80,7 +80,7 @@ func (r *Router) Pick(req ChatRequest) (*Worker, error) {
 }
 
 func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatRequest) (ChatResponse, error) {
-	worker, err := r.Pick(req)
+	worker, err := r.PickWorker(req)
 	if err != nil {
 		return ChatResponse{}, err
 	}
@@ -116,29 +116,4 @@ func (r *Router) StartCircuitRecoveryLoop() {
 			}
 		}
 	}()
-}
-
-func (r *Router) AddInFlight(requestID string, workerAddr string) {
-	r.inFlightM.Lock()
-	defer r.inFlightM.Unlock()
-
-	r.inFlight[requestID] = InFlight{
-		RequestID: requestID,
-		Worker:    workerAddr,
-		StartedAt: time.Now(),
-	}
-}
-
-func (r *Router) RemoveInFlight(requestID string) {
-	r.inFlightM.Lock()
-	defer r.inFlightM.Unlock()
-
-	delete(r.inFlight, requestID)
-}
-
-func (r *Router) InFlightCount() int {
-	r.inFlightM.RLock()
-	defer r.inFlightM.RUnlock()
-
-	return len(r.inFlight)
 }
