@@ -206,7 +206,7 @@ func (w *Worker) IsAvailable() bool {
 func (w *Worker) recordSuccess() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-
+	// reseting history is very aggresive here we need a history instead
 	if w.circuitState == CircuitHalfOpen {
 		w.circuitState = CircuitClosed
 		w.failures = 0
