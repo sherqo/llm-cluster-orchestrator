@@ -33,7 +33,11 @@ func (r *Router) AddWorker(addr string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.workers[id] = NewWorker(id, addr, 1)
+	w, err := NewWorker(id, addr, 1)
+	if err != nil {
+		return
+	}
+	r.workers[id] = w
 }
 
 func (r *Router) Pick(req ChatRequest) (*Worker, error) {

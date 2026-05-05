@@ -3,12 +3,15 @@ package lib
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	pb "master/generated"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 )
 
 type WorkerStatus string
@@ -47,7 +50,7 @@ type Worker struct {
 	mu     sync.RWMutex
 }
 
-func NewWorker(id, addr string, weight float64) *(Worker,error) {
+func NewWorker(id, addr string, weight float64) (*Worker, error) {
 	if weight <= 0 {
 		weight = 1
 	}
@@ -90,7 +93,7 @@ func NewWorker(id, addr string, weight float64) *(Worker,error) {
 		circuitState: CircuitClosed,
 		conn:         conn,
 		client:       pb.NewWorkerServiceClient(conn),
-	},nil
+	}, nil
 }
 
 func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (string, error) {
