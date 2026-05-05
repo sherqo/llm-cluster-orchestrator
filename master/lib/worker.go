@@ -11,10 +11,40 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+type WorkerStatus string
+
+const (
+	WorkerHealthy  WorkerStatus = "healthy"
+	WorkerDraining WorkerStatus = "draining"
+	WorkerDead     WorkerStatus = "dead"
+)
+
+
+type CircuitState string
+
+const (
+	CircuitClosed   CircuitState = "closed"
+	CircuitOpen     CircuitState = "open"
+	CircuitHalfOpen CircuitState = "half_open"
+)
+
 type Worker struct {
+	id     string
 	addr   string
+	weight float64
+
+	activeRequests int64
+	queueDepth     int64
+
+	status       WorkerStatus
+	circuitState CircuitState
+	failures     int64
+	successes    int64
+	openedAt     time.Time
+
 	client pb.WorkerServiceClient
 	conn   *grpc.ClientConn
+	mu     sync.RWMutex
 }
 
 func NewWorker(addr string) *Worker {
