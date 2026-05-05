@@ -47,17 +47,49 @@ type Worker struct {
 	mu     sync.RWMutex
 }
 
-func NewWorker(addr string) *Worker {
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+func NewWorker(id, addr string, weight float64) *(Worker,error) {
+	if weight <= 0 {
+		weight = 1
+	}
+
+	var conn *grpc.ClientConn
+	var err error
+	// i am keeping the server connection open and it will ping every 5s
+	maxAttempts := 3
+	backoff := 500 * time.Millisecond
+
+	for i := 0; i < maxAttempts; i++ {
+		conn, err = grpc.Dial(
+			addr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                5 * time.Second,
+				Timeout:             3 * time.Second,
+				PermitWithoutStream: true,
+			}),
+		)
+
+		if err == nil {
+			break
+		}
+
+		time.Sleep(backoff)  
+		backoff *= 2 // exponential backoff
+	}
+
 	if err != nil {
-		panic(fmt.Sprintf("failed to connect to worker %s: %v", addr, err))
+		return nil, fmt.Errorf("failed to connect after retries: %w", err)
 	}
 
 	return &Worker{
-		addr:   addr,
-		conn:   conn,
-		client: pb.NewWorkerServiceClient(conn),
-	}
+		id:           id,
+		addr:         addr,
+		weight:       weight,
+		status:       WorkerHealthy,
+		circuitState: CircuitClosed,
+		conn:         conn,
+		client:       pb.NewWorkerServiceClient(conn),
+	},nil
 }
 
 func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (string, error) {
