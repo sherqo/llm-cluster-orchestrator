@@ -9,13 +9,17 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 var ErrNoWorkersAvailable = errors.New("no workers available")
 var ErrWorkerFailed = errors.New("worker failed")
 
+type Strategy string
+
 const (
+	StrategyRoundRobin        = "round_robin"
 	StrategyLeastConnections  = "least_connections"
 	StrategyWeightedLeastLoad = "weighted_least_load"
 )
@@ -28,8 +32,10 @@ type Router struct {
 	inFlight  map[string]InFlight
 	inFlightM sync.RWMutex
 
-	strategy   string
-	strategyM sync.RWMutex
+	strategy   Strategy
+	strategyM  sync.RWMutex
+
+	rrCounter atomic.Uint64
 }
 
 // router methods

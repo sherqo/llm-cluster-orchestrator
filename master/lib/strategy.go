@@ -4,7 +4,7 @@ func (w *Worker) ActiveRequests() int64 {
 	return w.activeRequests.Load()
 }
 
-func (r *Router) SetStrategy(strategy string) {
+func (r *Router) SetStrategy(strategy Strategy) {
 	r.strategyM.Lock()
 	defer r.strategyM.Unlock()
 	r.strategy = strategy
@@ -21,11 +21,12 @@ func (r *Router) PickWorker(req ChatRequest) (*Worker, error) {
 	switch strategy {
 	case StrategyLeastConnections:
 		return r.pickLeastConnections()
+	case StrategyRoundRobin:
+		return r.pickRoundRobin()
 	default:
 		return r.pickWeightedLeastLoad()
 	}
 }
-
 
 // strategies for picking workers
 
@@ -73,4 +74,39 @@ func (r *Router) pickWeightedLeastLoad() (*Worker, error) {
 		return nil, ErrNoWorkersAvailable
 	}
 	return best, nil
+}
+
+func (r *Router) pickRoundRobin() (*Worker, error) {
+	var selected *Worker
+	count := 0
+
+	for _, worker := range r.workers {
+		if !worker.IsHealthy() {
+			continue
+		}
+		if count == int(r.rrCounter.Load()) {
+			selected = worker
+			break
+		}
+		count++
+	}
+
+	if selected == nil {
+		// wrap around
+		r.rrCounter.Store(0)
+		for _, worker := range r.workers {
+			if !worker.IsHealthy() {
+				continue
+			}
+			selected = worker
+			break
+		}
+	}
+
+	if selected != nil {
+		r.rrCounter.Add(1)
+		return selected, nil
+	}
+
+	return nil, ErrNoWorkersAvailable
 }
