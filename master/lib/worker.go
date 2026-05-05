@@ -31,13 +31,13 @@ const (
 	CircuitHalfOpen CircuitState = "half_open"
 )
 
+// worker struct represents a worker server
 type Worker struct {
-	id     string
-	addr   string
-	weight float64
+	id     string // unique identifier for the worker, eg: "worker-localhost:50051"
+	addr   string // address of the worker server, eg: "localhost:50051"
+	weight float64 // weight for load balancing, higher means more requests will be routed to this worker
 
 	activeRequests int64
-	queueDepth     int64
 
 	status       WorkerStatus
 	circuitState CircuitState
@@ -45,11 +45,13 @@ type Worker struct {
 	successes    int64
 	openedAt     time.Time
 
+	// gRPC client and connection
 	client pb.WorkerServiceClient
 	conn   *grpc.ClientConn
 	mu     sync.RWMutex
 }
 
+// constructor
 func NewWorker(id, addr string, weight float64) (*Worker, error) {
 	if weight <= 0 {
 		weight = 1
@@ -96,9 +98,11 @@ func NewWorker(id, addr string, weight float64) (*Worker, error) {
 	}, nil
 }
 
+// method to send a request to the worker and get a response
 func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (string, error) {
 	atomic.AddInt64(&w.activeRequests, 1)
 	defer atomic.AddInt64(&w.activeRequests, -1)
+	
 	//TODO: the timeout should be tier aware so pro get longer timouts than free users
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
@@ -115,7 +119,6 @@ func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (s
 		return "", err
 	}
 
-	atomic.StoreInt64(&w.queueDepth, int64(resp.QueueLength))
 	w.recordSuccess()
 
 	return resp.Reply, nil
@@ -124,13 +127,12 @@ func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (s
 // idk about this 
 func (w *Worker) loadScore() float64 {
 	active := atomic.LoadInt64(&w.activeRequests)
-	queue := atomic.LoadInt64(&w.queueDepth)
 
 	w.mu.RLock()
 	weight := w.weight
 	w.mu.RUnlock()
 
-	return float64(active+queue) / weight
+	return float64(active) / weight
 }
 
 func (w *Worker) isRoutable() bool {
@@ -219,6 +221,7 @@ func (w *Worker) recordSuccess() {
 
 	w.successes++
 }
+
 // higher is higher and "pro" users get higher priority than "free" users. Adjust as needed.
 func tierToPriority(tier string) int32 {
 	switch tier {
