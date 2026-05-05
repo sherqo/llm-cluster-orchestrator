@@ -3,15 +3,13 @@ package lib
 import (
 	"errors"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
-// Router holds all known workers and picks one per request.
-// Currently uses round-robin. Swap Pick() logic for anything else later.
 type Router struct {
-	workers   []*Worker
-	counter   atomic.Uint64
+	workers map[string]*Worker
+	mu      sync.RWMutex
+
 	inFlight  map[string]InFlight
 	inFlightM sync.RWMutex
 }
@@ -23,37 +21,87 @@ type InFlight struct {
 }
 
 func NewRouter() *Router {
-	return &Router{inFlight: make(map[string]InFlight)}
+	return &Router{
+		workers:  make(map[string]*Worker),
+		inFlight: make(map[string]InFlight),
+	}
 }
 
 func (r *Router) AddWorker(addr string) {
-	r.workers = append(r.workers, NewWorker(addr))
+	id := "worker-" + addr
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.workers[id] = NewWorker(id, addr, 1)
 }
 
 func (r *Router) Pick(req ChatRequest) (*Worker, error) {
-	if len(r.workers) == 0 {
-		return nil, errors.New("no workers registered")
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var best *Worker
+	var bestScore float64
+
+	for _, worker := range r.workers {
+		if !worker.isRoutable() {
+			continue
+		}
+
+		score := worker.loadScore()
+		if best == nil || score < bestScore {
+			best = worker
+			bestScore = score
+		}
 	}
 
-	// round-robin
-	idx := r.counter.Add(1) % uint64(len(r.workers))
-	return r.workers[idx], nil
+	if best == nil {
+		return nil, errors.New("no routable workers available")
+	}
+
+	return best, nil
+}
+
+func (r *Router) StartCircuitRecoveryLoop() {
+	ticker := time.NewTicker(1 * time.Second)
+
+	go func() {
+		for range ticker.C {
+			r.mu.RLock()
+			workers := make([]*Worker, 0, len(r.workers))
+			for _, worker := range r.workers {
+				workers = append(workers, worker)
+			}
+			r.mu.RUnlock()
+
+			for _, worker := range workers {
+				worker.maybeHalfOpen()
+			}
+		}
+	}()
 }
 
 func (r *Router) AddInFlight(requestID string, workerAddr string) {
 	r.inFlightM.Lock()
 	defer r.inFlightM.Unlock()
-	r.inFlight[requestID] = InFlight{RequestID: requestID, Worker: workerAddr, StartedAt: time.Now()}
+
+	r.inFlight[requestID] = InFlight{
+		RequestID: requestID,
+		Worker:    workerAddr,
+		StartedAt: time.Now(),
+	}
 }
 
 func (r *Router) RemoveInFlight(requestID string) {
 	r.inFlightM.Lock()
 	defer r.inFlightM.Unlock()
+
 	delete(r.inFlight, requestID)
 }
 
 func (r *Router) InFlightCount() int {
 	r.inFlightM.RLock()
 	defer r.inFlightM.RUnlock()
+
 	return len(r.inFlight)
 }
