@@ -17,15 +17,22 @@ func (r *Router) PickWorker(req ChatRequest) (*Worker, error) {
 
 	r.workersM.RLock()
 	defer r.workersM.RUnlock()
+	return r.pickWithStrategy(strategy)
+}
+
+func (r *Router) pickWithStrategy(strategy Strategy) (*Worker, error) {
+	var pick func() (*Worker, error)
 
 	switch strategy {
 	case StrategyLeastConnections:
-		return r.pickLeastConnections()
+		pick = r.pickLeastConnections
 	case StrategyRoundRobin:
-		return r.pickRoundRobin()
+		pick = r.pickRoundRobin
 	default:
-		return r.pickWeightedLeastLoad()
+		pick = r.pickWeightedLeastLoad
 	}
+
+	return pick()
 }
 
 // strategies for picking workers

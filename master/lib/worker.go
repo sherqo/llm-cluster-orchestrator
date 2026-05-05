@@ -17,11 +17,11 @@ import (
 type WorkerStatus string
 
 const (
-	WorkerHealthy  WorkerStatus = "healthy"
-	WorkerDraining WorkerStatus = "draining"
-	WorkerDead     WorkerStatus = "dead"
+	WorkerHealthy   WorkerStatus = "healthy"   // worker is healthy and can receive requests
+	WorkerSuspected WorkerStatus = "suspected" // worker is suspected to be unhealthy (e.g. failed requests) but not confirmed yet
+	WorkerDraining  WorkerStatus = "draining"  // worker is being drained and should not receive new requests, but can finish existing ones and then be removed
+	WorkerDead      WorkerStatus = "dead"      // worker is confirmed to be unhealthy and should be removed
 )
-
 
 type CircuitState string
 
@@ -33,8 +33,8 @@ const (
 
 // worker struct represents a worker server
 type Worker struct {
-	id     string // unique identifier for the worker, eg: "worker-localhost:50051"
-	addr   string // address of the worker server, eg: "localhost:50051"
+	id     string  // unique identifier for the worker, eg: "worker-localhost:50051"
+	addr   string  // address of the worker server, eg: "localhost:50051"
 	weight float64 // weight for load balancing, higher means more requests will be routed to this worker
 
 	activeRequests atomic.Int64
@@ -64,8 +64,7 @@ func NewWorker(id, addr string, weight float64) (*Worker, error) {
 	backoff := 500 * time.Millisecond
 
 	for i := 0; i < maxAttempts; i++ {
-		// dial is lazy so it doesn't gurantee the server is up at this meomment
-		conn, err = grpc.Dial(
+		conn, err = grpc.NewClient(
 			addr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{
@@ -79,7 +78,7 @@ func NewWorker(id, addr string, weight float64) (*Worker, error) {
 			break
 		}
 
-		time.Sleep(backoff)  
+		time.Sleep(backoff)
 		backoff *= 2 // exponential backoff
 	}
 
@@ -102,7 +101,7 @@ func NewWorker(id, addr string, weight float64) (*Worker, error) {
 func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (string, error) {
 	w.activeRequests.Add(1)
 	defer w.activeRequests.Add(-1)
-	
+
 	//TODO: the timeout should be tier aware so pro get longer timouts than free users
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
@@ -124,7 +123,7 @@ func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (s
 	return resp.Reply, nil
 }
 
-// idk about this 
+// idk about this
 func (w *Worker) loadScore() float64 {
 	active := w.activeRequests.Load()
 
@@ -197,6 +196,28 @@ func (w *Worker) IsHealthy() bool {
 	return w.status == WorkerHealthy
 }
 
+func (w *Worker) MarkSuspected() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.status == WorkerDead {
+		return
+	}
+
+	if w.status == WorkerSuspected {
+		w.status = WorkerDead
+		return
+	}
+	w.status = WorkerSuspected
+}
+
+func (w *Worker) MarkHealthy() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.status == WorkerDead {
+		return
+	}
+	w.status = WorkerHealthy
+}
 
 func (w *Worker) recordSuccess() {
 	w.mu.Lock()

@@ -30,12 +30,11 @@ func Serve(router *Router) {
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-
 // TODO: this crap is just here for now, but it should be more trasparent with fault tolerance
-// TODO: go routine for async stuff instead of blocking each other 
+// TODO: go routine for async stuff instead of blocking each other
 // first LB flow
 func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router) {
-  // http checks
+	// http checks
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -50,7 +49,7 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router) 
 
 	Verbose("server", "received chat request, userId="+req.UserID+", tier="+req.Tier)
 
-	// generate a unique request ID 
+	// generate a unique request ID
 	requestID, err := uuid.NewV7()
 	if err != nil {
 		Verbose("server", "failed to generate request id: "+err.Error())

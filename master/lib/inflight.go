@@ -9,7 +9,6 @@ type InFlight struct {
 	StartedAt time.Time
 }
 
-
 // in-flight request tracking methods (not strictly necessary, but can be useful for monitoring and debugging)
 func (r *Router) AddInFlight(requestID string, workerAddr string) {
 	r.inFlightM.Lock()
@@ -35,5 +34,3 @@ func (r *Router) InFlightCount() int {
 
 	return len(r.inFlight)
 }
-
-

@@ -24,16 +24,16 @@ const (
 	StrategyWeightedLeastLoad = "weighted_least_load"
 )
 
-// main router struct 
+// main router struct
 type Router struct {
-	workers map[string]*Worker
+	workers  map[string]*Worker
 	workersM sync.RWMutex
 
 	inFlight  map[string]InFlight
 	inFlightM sync.RWMutex
 
-	strategy   Strategy
-	strategyM  sync.RWMutex
+	strategy  Strategy
+	strategyM sync.RWMutex
 
 	rrCounter atomic.Uint64
 }
@@ -62,23 +62,32 @@ func (r *Router) AddWorker(addr string) {
 }
 
 func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatRequest) (ChatResponse, error) {
-	worker, err := r.PickWorker(req)
-	if err != nil {
-		return ChatResponse{}, err
+	var lastErr error
+
+	for attemptsLeft := 3; attemptsLeft > 0; attemptsLeft-- {
+		worker, err := r.PickWorker(req)
+		if err != nil {
+			break
+		}
+
+		r.AddInFlight(requestID, worker.addr)
+		reply, sendErr := worker.Send(ctx, requestID, req)
+		r.RemoveInFlight(requestID)
+
+		if sendErr == nil {
+			worker.MarkHealthy()
+			return ChatResponse{RequestID: requestID, Reply: reply}, nil
+		}
+
+		worker.MarkSuspected()
+		lastErr = sendErr
 	}
 
-	r.AddInFlight(requestID, worker.addr)
-	defer r.RemoveInFlight(requestID)
-
-	reply, err := worker.Send(ctx, requestID, req)
-	if err != nil {
-		return ChatResponse{}, fmt.Errorf("%w: %v", ErrWorkerFailed, err)
+	if lastErr != nil {
+		return ChatResponse{}, fmt.Errorf("%w: %v", ErrWorkerFailed, lastErr)
 	}
 
-	return ChatResponse{
-		RequestID: requestID,
-		Reply:     reply,
-	}, nil
+	return ChatResponse{}, ErrNoWorkersAvailable
 }
 
 func (r *Router) StartCircuitRecoveryLoop() {
