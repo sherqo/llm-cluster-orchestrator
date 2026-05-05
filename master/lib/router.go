@@ -1,3 +1,7 @@
+/*
+* This file contains the Load Balancer / Router logic for the master server.
+ */
+
 package lib
 
 import (
@@ -11,19 +15,23 @@ import (
 var ErrNoWorkersAvailable = errors.New("no workers available")
 var ErrWorkerFailed = errors.New("worker failed")
 
+// main router struct 
 type Router struct {
-	workers map[string]*Worker
-	mu      sync.RWMutex
+	workers map[string]*Worker // map of workers
+	workersM sync.RWMutex
 
 	inFlight  map[string]InFlight
 	inFlightM sync.RWMutex
 }
 
+// struct to track in-flight requests (is not needed for the application logic, but can be useful for monitoring and debugging)
 type InFlight struct {
 	RequestID string
 	Worker    string
 	StartedAt time.Time
 }
+
+// router methods
 
 func NewRouter() *Router {
 	return &Router{
@@ -35,8 +43,8 @@ func NewRouter() *Router {
 func (r *Router) AddWorker(addr string) {
 	id := "worker-" + addr
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.workersM.Lock()
+	defer r.workersM.Unlock()
 
 	w, err := NewWorker(id, addr, 1)
 	if err != nil {
@@ -46,8 +54,8 @@ func (r *Router) AddWorker(addr string) {
 }
 
 func (r *Router) Pick(req ChatRequest) (*Worker, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.workersM.RLock()
+	defer r.workersM.RUnlock()
 
 	var best *Worker
 	var bestScore float64
@@ -96,12 +104,12 @@ func (r *Router) StartCircuitRecoveryLoop() {
 
 	go func() {
 		for range ticker.C {
-			r.mu.RLock()
+			r.workersM.RLock()
 			workers := make([]*Worker, 0, len(r.workers))
 			for _, worker := range r.workers {
 				workers = append(workers, worker)
 			}
-			r.mu.RUnlock()
+			r.workersM.RUnlock()
 
 			for _, worker := range workers {
 				worker.maybeHalfOpen()

@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
+// structs
 type ChatRequest struct {
 	UserID string `json:"userId"`
 	Prompt string `json:"prompt"`
@@ -20,6 +21,7 @@ type ChatResponse struct {
 	Reply     string `json:"reply"`
 }
 
+// main server loop
 func Serve(router *Router) {
 	http.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
 		chatRequestHandler(w, r, router)
@@ -28,8 +30,12 @@ func Serve(router *Router) {
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
+
 // TODO: this crap is just here for now, but it should be more trasparent with fault tolerance
+// TODO: go routine for async stuff instead of blocking each other 
+// first LB flow
 func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router) {
+  // http checks
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -54,6 +60,7 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router) 
 	requestIDStr := requestID.String()
 	Verbose("server", "assigned requestId="+requestIDStr)
 
+	// handle the request and send errors
 	resp, err := router.HandleChat(r.Context(), requestIDStr, req)
 	if err != nil {
 		switch {
@@ -73,5 +80,5 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router) 
 	Verbose("server", "request completed, reqId="+resp.RequestID+" reply="+resp.Reply)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	json.NewEncoder(w).Encode(resp) // send the request back to the client
 }
