@@ -15,16 +15,42 @@
 package main
 
 import (
+	"log"
+	"os"
+	"strings"
+
 	lib "master/lib"
+	"master/monitoring"
+	"master/tui"
 )
 
 func main() {
+	monitoring.SetStdoutEnabled(false)
+	monitoring.SetVerboseEnabled(true)
+
 	router := lib.NewRouter() // create new LB and add routers to it
 
 	// manually for now
 	router.AddWorker("localhost:50051")
 	router.AddWorker("localhost:50052")
 	router.AddWorker("localhost:50053")
+	router.StartCircuitRecoveryLoop()
 
-	lib.Serve(router)
+	if seed := strings.TrimSpace(os.Getenv("MASTER_WORKERS")); seed != "" {
+		for _, addr := range strings.Split(seed, ",") {
+			a := strings.TrimSpace(addr)
+			if a == "" {
+				continue
+			}
+			if err := router.AddWorkerWithWeight(a, 1); err != nil {
+				log.Printf("failed to add seeded worker %s: %v", a, err)
+			}
+		}
+	}
+
+	go lib.Serve(router)
+
+	if err := tui.Run(router); err != nil {
+		log.Fatal(err)
+	}
 }

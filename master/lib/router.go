@@ -58,16 +58,7 @@ func NewRouterWithTracker(inflight *monitoring.InFlightStore) *Router {
 }
 
 func (r *Router) AddWorker(addr string) {
-	id := "worker-" + addr
-
-	r.workersM.Lock()
-	defer r.workersM.Unlock()
-
-	w, err := NewWorker(id, addr, 1)
-	if err != nil {
-		return
-	}
-	r.workers[id] = w
+	_ = r.AddWorkerWithWeight(addr, 1)
 }
 
 func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatRequest) (ChatResponse, error) {
@@ -132,4 +123,8 @@ func (r *Router) InFlightCount() int {
 
 func (r *Router) InFlightSnapshot() []monitoring.InFlight {
 	return r.inflight.GetAll()
+}
+
+func (r *Router) InFlightRecent(limit int) []monitoring.CompletedFlight {
+	return r.inflight.Recent(limit)
 }
