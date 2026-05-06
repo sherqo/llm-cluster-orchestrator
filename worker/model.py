@@ -1,66 +1,107 @@
 """
-model.py — LLM Model Runner
-Currently runs a mock LLM that simulates inference time.
+model.py - real Ollama LLM runner.
 
-To switch to a real model, replace the body of run_model()
-with an Ollama API call:
+This version gives each worker its own hard-coded Ollama server URL.
+Example:
+  worker 50051 -> Ollama http://127.0.0.1:11435
+  worker 50052 -> Ollama http://127.0.0.1:11436
+  worker 50053 -> Ollama http://127.0.0.1:11437
 
-    import requests
-    response = requests.post("http://localhost:11434/api/generate",
-        json={"model": "llama3", "prompt": full_prompt, "stream": False})
-    return response.json()["response"]
+The worker starts its matching Ollama server in worker/main.py.
 """
 
-import time
-import random
+import os
+import requests
+
+
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180"))
+
+WORKER_TO_OLLAMA_PORT = {
+    50051: 11435,
+    50052: 11436,
+    50053: 11437,
+    50054: 11438,
+}
+
+
+def get_ollama_port(worker_port: int) -> int:
+    if worker_port in WORKER_TO_OLLAMA_PORT:
+        return WORKER_TO_OLLAMA_PORT[worker_port]
+
+    return 11435 + max(0, worker_port - 50051)
+
+
+def get_ollama_url(worker_port: int) -> str:
+    return f"http://127.0.0.1:{get_ollama_port(worker_port)}"
+
+
+def build_prompt(prompt: str, context: str) -> str:
+    if context:
+        return (
+            "You are a helpful assistant for a RAG system.\n"
+            "Use the retrieved context when it is relevant.\n"
+            "If the context is not enough, say what is missing and answer clearly.\n\n"
+            f"Retrieved context:\n{context}\n\n"
+            f"User question:\n{prompt}\n\n"
+            "Answer:"
+        )
+
+    return (
+        "You are a helpful assistant.\n\n"
+        f"User question:\n{prompt}\n\n"
+        "Answer:"
+    )
 
 
 def run_model(prompt: str, context: str, worker_port: int) -> str:
-    """
-    Takes the user prompt and RAG context,
-    runs the LLM (or mock), returns the reply string.
+    ollama_url = get_ollama_url(worker_port)
+    full_prompt = build_prompt(prompt, context)
 
-    Args:
-        prompt:      the user's original question
-        context:     retrieved chunks from ChromaDB (can be empty)
-        worker_port: used in mock reply so you can see which worker answered
-    """
-
-    # ── BUILD THE FULL PROMPT ──────────────────
-    # This is what would be sent to the real LLM.
-    # Context from RAG is injected here so the model
-    # can use it to answer the question accurately.
-    if context:
-        full_prompt = (
-            f"You are a helpful assistant. Use the following context to answer the question.\n\n"
-            f"Context:\n{context}\n\n"
-            f"Question: {prompt}\n"
-            f"Answer:"
+    try:
+        response = requests.post(
+            f"{ollama_url}/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": full_prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.2,
+                },
+            },
+            timeout=OLLAMA_TIMEOUT_SECONDS,
         )
-    else:
-        full_prompt = (
-            f"You are a helpful assistant.\n\n"
-            f"Question: {prompt}\n"
-            f"Answer:"
-        )
+        response.raise_for_status()
 
-    # ── MOCK INFERENCE ─────────────────────────
-    # Simulates the time a real LLM would take (0.3 to 1.2 seconds)
-    time.sleep(random.uniform(0.3, 1.2))
+        answer = response.json().get("response", "").strip()
+        if not answer:
+            return f"[worker:{worker_port}] Ollama returned an empty response."
 
-    # ── MOCK RESPONSE ──────────────────────────
-    if context:
         return (
-            f"[worker:{worker_port}]\n\n"
-            f"Question: {prompt}\n\n"
-            f"Retrieved context:\n{context}\n\n"
-            f"Answer: This is a mock response. "
-            f"Replace run_model() in model.py with a real Ollama call to get real answers."
+            f"[worker:{worker_port}]\n"
+            f"[ollama:{ollama_url}]\n"
+            f"[model:{OLLAMA_MODEL}]\n\n"
+            f"{answer}"
         )
-    else:
+
+    except requests.exceptions.ConnectionError:
         return (
-            f"[worker:{worker_port}]\n\n"
-            f"Question: {prompt}\n\n"
-            f"Answer: No relevant context found in ChromaDB. "
-            f"This is a mock response with no RAG context."
+            f"[worker:{worker_port}] ERROR: Could not connect to private Ollama at {ollama_url}.\n"
+            "The worker should have started its own Ollama process.\n"
+            "Check the worker terminal and the logs/ollama_*.log file."
         )
+
+    except requests.exceptions.Timeout:
+        return (
+            f"[worker:{worker_port}] ERROR: Ollama timed out after "
+            f"{OLLAMA_TIMEOUT_SECONDS} seconds. Try a smaller model such as llama3.2:1b."
+        )
+
+    except requests.exceptions.HTTPError as exc:
+        return (
+            f"[worker:{worker_port}] ERROR: Ollama HTTP error: {exc}\n"
+            f"Response body: {response.text}"
+        )
+
+    except Exception as exc:
+        return f"[worker:{worker_port}] ERROR while calling Ollama: {exc}"
