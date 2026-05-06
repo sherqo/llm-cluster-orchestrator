@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"master/monitoring"
 )
 
 var ErrNoWorkersAvailable = errors.New("no workers available")
@@ -29,8 +31,7 @@ type Router struct {
 	workers  map[string]*Worker
 	workersM sync.RWMutex
 
-	inFlight  map[string]InFlight
-	inFlightM sync.RWMutex
+	inflight *monitoring.InFlightStore
 
 	strategy  Strategy
 	strategyM sync.RWMutex
@@ -41,9 +42,17 @@ type Router struct {
 // router methods
 
 func NewRouter() *Router {
+	return NewRouterWithTracker(nil)
+}
+
+func NewRouterWithTracker(inflight *monitoring.InFlightStore) *Router {
+	if inflight == nil {
+		inflight = monitoring.NewInFlightStore()
+	}
+
 	return &Router{
 		workers:  make(map[string]*Worker),
-		inFlight: make(map[string]InFlight),
+		inflight: inflight,
 		strategy: StrategyLeastConnections,
 	}
 }
@@ -107,4 +116,20 @@ func (r *Router) StartCircuitRecoveryLoop() {
 			}
 		}
 	}()
+}
+
+func (r *Router) AddInFlight(requestID, workerAddr string) {
+	r.inflight.Add(requestID, workerAddr)
+}
+
+func (r *Router) RemoveInFlight(requestID string) {
+	r.inflight.Remove(requestID)
+}
+
+func (r *Router) InFlightCount() int {
+	return r.inflight.Count()
+}
+
+func (r *Router) InFlightSnapshot() []monitoring.InFlight {
+	return r.inflight.GetAll()
 }

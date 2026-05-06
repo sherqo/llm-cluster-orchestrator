@@ -7,6 +7,8 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+
+	monitoring "master/monitoring"
 )
 
 // structs
@@ -42,41 +44,41 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router) 
 
 	var req ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		Verbose("server", "invalid JSON from client")
+		monitoring.Verbose("server", "invalid JSON from client")
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	Verbose("server", "received chat request, userId="+req.UserID+", tier="+req.Tier)
+	monitoring.Verbose("server", "received chat request, userId="+req.UserID+", tier="+req.Tier)
 
 	// generate a unique request ID
 	requestID, err := uuid.NewV7()
 	if err != nil {
-		Verbose("server", "failed to generate request id: "+err.Error())
+		monitoring.Verbose("server", "failed to generate request id: "+err.Error())
 		http.Error(w, "failed to assign request id", http.StatusInternalServerError)
 		return
 	}
 	requestIDStr := requestID.String()
-	Verbose("server", "assigned requestId="+requestIDStr)
+	monitoring.Verbose("server", "assigned requestId="+requestIDStr)
 
 	// handle the request and send errors
 	resp, err := router.HandleChat(r.Context(), requestIDStr, req)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrNoWorkersAvailable):
-			Verbose("server", "no workers available")
+			monitoring.Verbose("server", "no workers available")
 			http.Error(w, "no workers available", http.StatusServiceUnavailable)
 		case errors.Is(err, ErrWorkerFailed):
-			Verbose("server", err.Error())
+			monitoring.Verbose("server", err.Error())
 			http.Error(w, err.Error(), http.StatusBadGateway)
 		default:
-			Verbose("server", err.Error())
+			monitoring.Verbose("server", err.Error())
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 		}
 		return
 	}
 
-	Verbose("server", "request completed, reqId="+resp.RequestID+" reply="+resp.Reply)
+	monitoring.Verbose("server", "request completed, reqId="+resp.RequestID+" reply="+resp.Reply)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp) // send the request back to the client
