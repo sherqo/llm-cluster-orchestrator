@@ -216,6 +216,51 @@ func (w *Worker) MaybeResurrectFromDead() {
 	}
 }
 
+func (w *Worker) Snapshot() WorkerSnapshot {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	return WorkerSnapshot{
+		ID:             w.id,
+		Addr:           w.addr,
+		Weight:         w.weight,
+		Status:         w.status,
+		CircuitState:   w.circuitState,
+		Failures:       w.failures,
+		Successes:      w.successes,
+		ActiveRequests: w.activeRequests.Load(),
+		LoadScore:      float64(w.activeRequests.Load()) / w.weight,
+	}
+}
+
+func (w *Worker) SetDraining() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.status == WorkerDead {
+		return
+	}
+	w.status = WorkerDraining
+}
+
+func (w *Worker) Close() error {
+	if w.conn == nil {
+		return nil
+	}
+	return w.conn.Close()
+}
+
+func (w *Worker) ID() string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.id
+}
+
+func (w *Worker) Addr() string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.addr
+}
+
 // higher is higher and "pro" users get higher priority than "free" users. Adjust as needed.
 func tierToPriority(tier string) int32 {
 	switch tier {
