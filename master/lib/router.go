@@ -84,7 +84,7 @@ func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatReque
 	}
 
 	if lastErr != nil {
-		return ChatResponse{}, fmt.Errorf("%w: %v", ErrWorkerFailed, lastErr)
+		return ChatResponse{}, fmt.Errorf("%w: %w", ErrWorkerFailed, lastErr)
 	}
 
 	return ChatResponse{}, ErrNoWorkersAvailable
