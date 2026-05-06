@@ -1,59 +1,110 @@
+/*
+* This file contains the Load Balancer / Router logic for the master server.
+ */
+
 package lib
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// Router holds all known workers and picks one per request.
-// Currently uses round-robin. Swap Pick() logic for anything else later.
+var ErrNoWorkersAvailable = errors.New("no workers available")
+var ErrWorkerFailed = errors.New("worker failed")
+
+type Strategy string
+
+const (
+	StrategyRoundRobin        = "round_robin"
+	StrategyLeastConnections  = "least_connections"
+	StrategyWeightedLeastLoad = "weighted_least_load"
+)
+
+// main router struct
 type Router struct {
-	workers   []*Worker
-	counter   atomic.Uint64
+	workers  map[string]*Worker
+	workersM sync.RWMutex
+
 	inFlight  map[string]InFlight
 	inFlightM sync.RWMutex
+
+	strategy  Strategy
+	strategyM sync.RWMutex
+
+	rrCounter atomic.Uint64
 }
 
-type InFlight struct {
-	RequestID string
-	Worker    string
-	StartedAt time.Time
-}
+// router methods
 
 func NewRouter() *Router {
-	return &Router{inFlight: make(map[string]InFlight)}
+	return &Router{
+		workers:  make(map[string]*Worker),
+		inFlight: make(map[string]InFlight),
+		strategy: StrategyLeastConnections,
+	}
 }
 
 func (r *Router) AddWorker(addr string) {
-	r.workers = append(r.workers, NewWorker(addr))
+	id := "worker-" + addr
+
+	r.workersM.Lock()
+	defer r.workersM.Unlock()
+
+	w, err := NewWorker(id, addr, 1)
+	if err != nil {
+		return
+	}
+	r.workers[id] = w
 }
 
-func (r *Router) Pick(req ChatRequest) (*Worker, error) {
-	if len(r.workers) == 0 {
-		return nil, errors.New("no workers registered")
+func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatRequest) (ChatResponse, error) {
+	var lastErr error
+
+	for attemptsLeft := 3; attemptsLeft > 0; attemptsLeft-- {
+		worker, err := r.PickWorker(req)
+		if err != nil {
+			break
+		}
+
+		r.AddInFlight(requestID, worker.addr)
+		reply, sendErr := worker.Send(ctx, requestID, req)
+		r.RemoveInFlight(requestID)
+
+		if sendErr == nil {
+			worker.MarkHealthy()
+			return ChatResponse{RequestID: requestID, Reply: reply}, nil
+		}
+
+		worker.MarkSuspected()
+		lastErr = sendErr
 	}
 
-	// round-robin
-	idx := r.counter.Add(1) % uint64(len(r.workers))
-	return r.workers[idx], nil
+	if lastErr != nil {
+		return ChatResponse{}, fmt.Errorf("%w: %w", ErrWorkerFailed, lastErr)
+	}
+
+	return ChatResponse{}, ErrNoWorkersAvailable
 }
 
-func (r *Router) AddInFlight(requestID string, workerAddr string) {
-	r.inFlightM.Lock()
-	defer r.inFlightM.Unlock()
-	r.inFlight[requestID] = InFlight{RequestID: requestID, Worker: workerAddr, StartedAt: time.Now()}
-}
+func (r *Router) StartCircuitRecoveryLoop() {
+	ticker := time.NewTicker(1 * time.Second)
 
-func (r *Router) RemoveInFlight(requestID string) {
-	r.inFlightM.Lock()
-	defer r.inFlightM.Unlock()
-	delete(r.inFlight, requestID)
-}
+	go func() {
+		for range ticker.C {
+			r.workersM.RLock()
+			workers := make([]*Worker, 0, len(r.workers))
+			for _, worker := range r.workers {
+				workers = append(workers, worker)
+			}
+			r.workersM.RUnlock()
 
-func (r *Router) InFlightCount() int {
-	r.inFlightM.RLock()
-	defer r.inFlightM.RUnlock()
-	return len(r.inFlight)
+			for _, worker := range workers {
+				worker.maybeHalfOpen()
+			}
+		}
+	}()
 }

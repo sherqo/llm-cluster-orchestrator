@@ -2,12 +2,14 @@ package lib
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 
 	"github.com/google/uuid"
 )
 
+// structs
 type ChatRequest struct {
 	UserID string `json:"userId"`
 	Prompt string `json:"prompt"`
@@ -19,6 +21,7 @@ type ChatResponse struct {
 	Reply     string `json:"reply"`
 }
 
+// main server loop
 func Serve(router *Router) {
 	http.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
 		chatRequestHandler(w, r, router)
@@ -28,7 +31,10 @@ func Serve(router *Router) {
 }
 
 // TODO: this crap is just here for now, but it should be more trasparent with fault tolerance
+// TODO: go routine for async stuff instead of blocking each other
+// first LB flow
 func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router) {
+	// http checks
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -43,41 +49,35 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router) 
 
 	Verbose("server", "received chat request, userId="+req.UserID+", tier="+req.Tier)
 
-	worker, err := router.Pick(req)
-	if err != nil {
-		Verbose("server", "no workers available")
-		http.Error(w, "no workers available", http.StatusServiceUnavailable)
-		return
-	}
-
-	Verbose("server", "picked worker="+worker.addr)
-
+	// generate a unique request ID
 	requestID, err := uuid.NewV7()
 	if err != nil {
-		Verbose("server", "failed to generate UUID: "+err.Error())
+		Verbose("server", "failed to generate request id: "+err.Error())
 		http.Error(w, "failed to assign request id", http.StatusInternalServerError)
 		return
 	}
-
 	requestIDStr := requestID.String()
 	Verbose("server", "assigned requestId="+requestIDStr)
 
-	router.AddInFlight(requestIDStr, worker.addr)
-	defer router.RemoveInFlight(requestIDStr)
-	Verbose("server", "added in-flight: reqId="+requestIDStr+" worker="+worker.addr)
-
-	reply, err := worker.Send(r.Context(), requestIDStr, req)
+	// handle the request and send errors
+	resp, err := router.HandleChat(r.Context(), requestIDStr, req)
 	if err != nil {
-		Verbose("server", "worker failed: "+err.Error())
-		http.Error(w, "worker failed: "+err.Error(), http.StatusBadGateway)
+		switch {
+		case errors.Is(err, ErrNoWorkersAvailable):
+			Verbose("server", "no workers available")
+			http.Error(w, "no workers available", http.StatusServiceUnavailable)
+		case errors.Is(err, ErrWorkerFailed):
+			Verbose("server", err.Error())
+			http.Error(w, err.Error(), http.StatusBadGateway)
+		default:
+			Verbose("server", err.Error())
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
 		return
 	}
 
-	Verbose("server", "request completed, reqId="+requestIDStr+" reply="+reply)
+	Verbose("server", "request completed, reqId="+resp.RequestID+" reply="+resp.Reply)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(ChatResponse{
-		RequestID: requestIDStr,
-		Reply:     reply,
-	})
+	json.NewEncoder(w).Encode(resp) // send the request back to the client
 }
