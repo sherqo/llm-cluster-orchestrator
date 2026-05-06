@@ -1,3 +1,5 @@
 protobuf
-grpcio 
-grpcio-tools 
+grpcio
+grpcio-tools
+requests
+sentence-transformers
