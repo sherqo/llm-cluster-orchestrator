@@ -3,6 +3,7 @@ Here, you can find the documentation for the agent component of our system. The 
 the language didn't specified
 
 the tasks of the agents are so simple
-it just needs to take a control over the machine it's running on and get some info about it and open new processes in there.
+- monitor system resources
+- add worker and return a way of communication (service_name or ip and port) smth to the loadbalancer so we can communicate
 
-the agent also is the one who is responsible for starting the ollama instance
+

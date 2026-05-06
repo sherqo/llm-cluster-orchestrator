@@ -23,14 +23,6 @@ const (
 	WorkerDead      WorkerStatus = "dead"      // worker is confirmed to be unhealthy and should be removed
 )
 
-type CircuitState string
-
-const (
-	CircuitClosed   CircuitState = "closed"
-	CircuitOpen     CircuitState = "open"
-	CircuitHalfOpen CircuitState = "half_open"
-)
-
 // worker struct represents a worker server
 type Worker struct {
 	id     string  // unique identifier for the worker, eg: "worker-localhost:50051"
@@ -39,11 +31,9 @@ type Worker struct {
 
 	activeRequests atomic.Int64
 
-	status       WorkerStatus
-	circuitState CircuitState
-	failures     int64
-	successes    int64
-	openedAt     time.Time
+	status              WorkerStatus
+	statusChangedAt     time.Time // timestamp when status last changed
+	consecutiveFailures int64     // track consecutive failures to determine if suspected
 
 	// gRPC client and connection
 	client pb.WorkerServiceClient
@@ -87,13 +77,13 @@ func NewWorker(id, addr string, weight float64) (*Worker, error) {
 	}
 
 	return &Worker{
-		id:           id,
-		addr:         addr,
-		weight:       weight,
-		status:       WorkerHealthy,
-		circuitState: CircuitClosed,
-		conn:         conn,
-		client:       pb.NewWorkerServiceClient(conn),
+		id:             id,
+		addr:           addr,
+		weight:         weight,
+		status:         WorkerHealthy,
+		statusChangedAt: time.Now(),
+		conn:           conn,
+		client:         pb.NewWorkerServiceClient(conn),
 	}, nil
 }
 
@@ -114,11 +104,8 @@ func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (s
 	if err != nil {
 		//TODO: beter error handling here to add priority to certain errors
 		//TODO: add retry
-		w.recordFailure()
 		return "", err
 	}
-
-	w.recordSuccess()
 
 	return resp.Reply, nil
 }
@@ -138,55 +125,7 @@ func (w *Worker) isRoutable() bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	if w.status != WorkerHealthy {
-		return false
-	}
-
-	switch w.circuitState {
-	case CircuitClosed:
-		return true
-	case CircuitHalfOpen:
-		return w.activeRequests.Load() == 0
-	default:
-		return false
-	}
-}
-
-func (w *Worker) maybeHalfOpen() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if w.circuitState != CircuitOpen {
-		return
-	}
-
-	if time.Since(w.openedAt) >= 10*time.Second {
-		w.circuitState = CircuitHalfOpen
-	}
-}
-
-func (w *Worker) recordFailure() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if w.circuitState == CircuitHalfOpen {
-		w.circuitState = CircuitOpen
-		w.openedAt = time.Now()
-		return
-	}
-
-	w.failures++
-	//handling it softly
-	total := w.failures + w.successes
-	if total >= 20 {
-		failureRate := float64(w.failures) / float64(total)
-		if failureRate > 0.50 {
-			w.circuitState = CircuitOpen
-			w.openedAt = time.Now()
-			w.failures = 0
-			w.successes = 0
-		}
-	}
+	return w.status == WorkerHealthy
 }
 
 func (w *Worker) IsHealthy() bool {
@@ -194,6 +133,12 @@ func (w *Worker) IsHealthy() bool {
 	defer w.mu.RUnlock()
 
 	return w.status == WorkerHealthy
+}
+
+func (w *Worker) GetStatus() WorkerStatus {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.status
 }
 
 func (w *Worker) MarkSuspected() {
@@ -205,9 +150,12 @@ func (w *Worker) MarkSuspected() {
 
 	if w.status == WorkerSuspected {
 		w.status = WorkerDead
+		w.statusChangedAt = time.Now()
 		return
 	}
 	w.status = WorkerSuspected
+	w.statusChangedAt = time.Now()
+	w.consecutiveFailures++
 }
 
 func (w *Worker) MarkHealthy() {
@@ -217,20 +165,55 @@ func (w *Worker) MarkHealthy() {
 		return
 	}
 	w.status = WorkerHealthy
+	w.statusChangedAt = time.Now()
+	w.consecutiveFailures = 0
 }
 
-func (w *Worker) recordSuccess() {
+func (w *Worker) MarkDraining() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	// reseting history is very aggresive here we need a history instead
-	if w.circuitState == CircuitHalfOpen {
-		w.circuitState = CircuitClosed
-		w.failures = 0
-		w.successes = 0
+	if w.status == WorkerDead {
+		return
+	}
+	w.status = WorkerDraining
+	w.statusChangedAt = time.Now()
+}
+
+// MaybeRecoverFromSuspected attempts to recover a suspected worker back to healthy status
+// after a timeout period has elapsed. This allows temporary failures to not permanently kill workers.
+func (w *Worker) MaybeRecoverFromSuspected() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.status != WorkerSuspected {
 		return
 	}
 
-	w.successes++
+	// If suspected for more than 30 seconds, try to recover it back to healthy
+	if time.Since(w.statusChangedAt) >= 30*time.Second {
+		w.status = WorkerHealthy
+		w.statusChangedAt = time.Now()
+		w.consecutiveFailures = 0
+	}
+}
+
+// MaybeResurrectFromDead attempts to resurrect a dead worker after a long timeout period
+// This is a last-resort recovery mechanism for workers that have been dead for a long time
+func (w *Worker) MaybeResurrectFromDead() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.status != WorkerDead {
+		return
+	}
+
+	// If dead for more than 5 minutes, try to resurrect it back to suspected
+	// so it gets another chance
+	if time.Since(w.statusChangedAt) >= 5*time.Minute {
+		w.status = WorkerSuspected
+		w.statusChangedAt = time.Now()
+		w.consecutiveFailures = 0
+	}
 }
 
 // higher is higher and "pro" users get higher priority than "free" users. Adjust as needed.

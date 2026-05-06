@@ -103,7 +103,10 @@ func (r *Router) StartCircuitRecoveryLoop() {
 			r.workersM.RUnlock()
 
 			for _, worker := range workers {
-				worker.maybeHalfOpen()
+				// Try to recover suspected workers back to healthy
+				worker.MaybeRecoverFromSuspected()
+				// Try to resurrect dead workers back to suspected
+				worker.MaybeResurrectFromDead()
 			}
 		}
 	}()
