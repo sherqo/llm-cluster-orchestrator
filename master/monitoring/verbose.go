@@ -1,4 +1,4 @@
-package lib
+package monitoring
 
 import (
 	"fmt"
