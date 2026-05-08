@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"master/monitoring"
 )
@@ -21,9 +20,8 @@ var ErrWorkerFailed = errors.New("worker failed")
 type Strategy string
 
 const (
-	StrategyRoundRobin        = "round_robin"
-	StrategyLeastConnections  = "least_connections"
-	StrategyWeightedLeastLoad = "weighted_least_load"
+	StrategyRoundRobin       = "round_robin"
+	StrategyLeastConnections = "least_connections"
 )
 
 // main router struct
@@ -57,10 +55,6 @@ func NewRouterWithTracker(inflight *monitoring.InFlightStore) *Router {
 	}
 }
 
-func (r *Router) AddWorker(addr string) {
-	_ = r.AddWorkerWithWeight(addr, 1)
-}
-
 func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatRequest) (ChatResponse, error) {
 	var lastErr error
 
@@ -88,25 +82,6 @@ func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatReque
 	}
 
 	return ChatResponse{}, ErrNoWorkersAvailable
-}
-
-func (r *Router) StartCircuitRecoveryLoop() {
-	ticker := time.NewTicker(1 * time.Second)
-
-	go func() {
-		for range ticker.C {
-			r.workersM.RLock()
-			workers := make([]*Worker, 0, len(r.workers))
-			for _, worker := range r.workers {
-				workers = append(workers, worker)
-			}
-			r.workersM.RUnlock()
-
-			for _, worker := range workers {
-				worker.maybeHalfOpen()
-			}
-		}
-	}()
 }
 
 func (r *Router) AddInFlight(requestID, workerAddr string) {

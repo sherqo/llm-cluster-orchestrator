@@ -28,8 +28,6 @@ func (r *Router) pickWithStrategy(strategy Strategy) (*Worker, error) {
 		pick = r.pickLeastConnections
 	case StrategyRoundRobin:
 		pick = r.pickRoundRobin
-	default:
-		pick = r.pickWeightedLeastLoad
 	}
 
 	return pick()
@@ -51,29 +49,6 @@ func (r *Router) pickLeastConnections() (*Worker, error) {
 		if best == nil || active < minActive {
 			best = worker
 			minActive = active
-		}
-	}
-
-	if best == nil {
-		return nil, ErrNoWorkersAvailable
-	}
-	return best, nil
-}
-
-// pickWeightedLeastLoad picks the worker with the lowest load score (active requests / weight)
-func (r *Router) pickWeightedLeastLoad() (*Worker, error) {
-	var best *Worker
-	var bestScore float64
-
-	for _, worker := range r.workers {
-		if !worker.isRoutable() {
-			continue
-		}
-
-		score := worker.loadScore()
-		if best == nil || score < bestScore {
-			best = worker
-			bestScore = score
 		}
 	}
 

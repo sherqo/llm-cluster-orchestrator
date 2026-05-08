@@ -23,27 +23,16 @@ const (
 	WorkerDead      WorkerStatus = "dead"      // worker is confirmed to be unhealthy and should be removed
 )
 
-type CircuitState string
-
-const (
-	CircuitClosed   CircuitState = "closed"
-	CircuitOpen     CircuitState = "open"
-	CircuitHalfOpen CircuitState = "half_open"
-)
-
 // worker struct represents a worker server
 type Worker struct {
-	id     string  // unique identifier for the worker, eg: "worker-localhost:50051"
-	addr   string  // address of the worker server, eg: "localhost:50051"
-	weight float64 // weight for load balancing, higher means more requests will be routed to this worker
+	id     string // unique identifier for the worker, eg: "worker-localhost:50051"
+	addr   string // address of the worker server, eg: "localhost:50051"
 
 	activeRequests atomic.Int64
 
-	status       WorkerStatus
-	circuitState CircuitState
-	failures     int64
-	successes    int64
-	openedAt     time.Time
+	status    WorkerStatus
+	failures  int64
+	successes int64
 
 	// gRPC client and connection
 	client pb.WorkerServiceClient
@@ -52,11 +41,7 @@ type Worker struct {
 }
 
 // constructor
-func NewWorker(id, addr string, weight float64) (*Worker, error) {
-	if weight <= 0 {
-		weight = 1
-	}
-
+func NewWorker(id, addr string) (*Worker, error) {
 	var conn *grpc.ClientConn
 	var err error
 	// i am keeping the server connection open and it will ping every 5s
@@ -87,13 +72,11 @@ func NewWorker(id, addr string, weight float64) (*Worker, error) {
 	}
 
 	return &Worker{
-		id:           id,
-		addr:         addr,
-		weight:       weight,
-		status:       WorkerHealthy,
-		circuitState: CircuitClosed,
-		conn:         conn,
-		client:       pb.NewWorkerServiceClient(conn),
+		id:     id,
+		addr:   addr,
+		status: WorkerHealthy,
+		conn:   conn,
+		client: pb.NewWorkerServiceClient(conn),
 	}, nil
 }
 
@@ -123,70 +106,11 @@ func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (s
 	return resp.Reply, nil
 }
 
-// idk about this
-func (w *Worker) loadScore() float64 {
-	active := w.activeRequests.Load()
-
-	w.mu.RLock()
-	weight := w.weight
-	w.mu.RUnlock()
-
-	return float64(active) / weight
-}
-
-func (w *Worker) isRoutable() bool {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-
-	if w.status != WorkerHealthy {
-		return false
-	}
-
-	switch w.circuitState {
-	case CircuitClosed:
-		return true
-	case CircuitHalfOpen:
-		return w.activeRequests.Load() == 0
-	default:
-		return false
-	}
-}
-
-func (w *Worker) maybeHalfOpen() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if w.circuitState != CircuitOpen {
-		return
-	}
-
-	if time.Since(w.openedAt) >= 10*time.Second {
-		w.circuitState = CircuitHalfOpen
-	}
-}
-
 func (w *Worker) recordFailure() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.circuitState == CircuitHalfOpen {
-		w.circuitState = CircuitOpen
-		w.openedAt = time.Now()
-		return
-	}
-
 	w.failures++
-	//handling it softly
-	total := w.failures + w.successes
-	if total >= 20 {
-		failureRate := float64(w.failures) / float64(total)
-		if failureRate > 0.50 {
-			w.circuitState = CircuitOpen
-			w.openedAt = time.Now()
-			w.failures = 0
-			w.successes = 0
-		}
-	}
 }
 
 func (w *Worker) IsHealthy() bool {
@@ -222,13 +146,6 @@ func (w *Worker) MarkHealthy() {
 func (w *Worker) recordSuccess() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	// reseting history is very aggresive here we need a history instead
-	if w.circuitState == CircuitHalfOpen {
-		w.circuitState = CircuitClosed
-		w.failures = 0
-		w.successes = 0
-		return
-	}
 
 	w.successes++
 }
@@ -240,13 +157,10 @@ func (w *Worker) Snapshot() WorkerSnapshot {
 	return WorkerSnapshot{
 		ID:             w.id,
 		Addr:           w.addr,
-		Weight:         w.weight,
 		Status:         w.status,
-		CircuitState:   w.circuitState,
 		Failures:       w.failures,
 		Successes:      w.successes,
 		ActiveRequests: w.activeRequests.Load(),
-		LoadScore:      float64(w.activeRequests.Load()) / w.weight,
 	}
 }
 
