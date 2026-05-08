@@ -44,13 +44,7 @@ func NewDockerManager(cfg AgentConfig) (*DockerManager, error) {
 func (d *DockerManager) CreateWorker(
 	req CreateWorkerRequest,
 ) (CreateWorkerResponse, error) {
-	image := req.Image
-	if image == "" {
-		image = d.cfg.WorkerImage
-	}
-	if image == "" {
-		return CreateWorkerResponse{}, fmt.Errorf("worker image is required")
-	}
+	image := d.cfg.WorkerImage
 
 	hostPort, err := d.allocateHostPort()
 	if err != nil {
@@ -63,10 +57,7 @@ func (d *DockerManager) CreateWorker(
 		hostPort,
 		time.Now().UnixMilli(),
 	)
-	name := req.Name
-	if name == "" {
-		name = "llm-" + workerID
-	}
+	name := "llm-" + workerID
 
 	port := nat.Port(strconv.Itoa(workerContainerPort) + "/tcp")
 	env := append([]string{}, req.Env...)

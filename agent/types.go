@@ -19,9 +19,7 @@ type AgentRegistrationRequest struct {
 }
 
 type CreateWorkerRequest struct {
-	Image string   `json:"image,omitempty"`
-	Name  string   `json:"name,omitempty"`
-	Env   []string `json:"env,omitempty"`
+	Env []string `json:"env,omitempty"`
 }
 
 type CreateWorkerResponse struct {
