@@ -13,6 +13,9 @@ import (
 	"time"
 
 	"master/monitoring"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type AgentInfo struct {
@@ -107,6 +110,13 @@ func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatReque
 		}
 
 		lastErr = sendErr
+		
+		// If it's a deadline exceeded, the worker is just overloaded
+		if st, ok := status.FromError(sendErr); ok && st.Code() == codes.DeadlineExceeded {
+			monitoring.Verbose("router", "worker "+worker.id+" deadline exceeded (overloaded)")
+		} else {
+			monitoring.Verbose("router", "worker "+worker.id+" returned error: "+sendErr.Error())
+		}
 	}
 
 	if lastErr != nil {

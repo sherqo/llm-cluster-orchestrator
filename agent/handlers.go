@@ -103,6 +103,40 @@ func CleanWorkerHandler(
 	}
 }
 
+func DestroyWorkerHandler(
+	docker *DockerManager,
+) http.HandlerFunc {
+	return func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		workerID := r.URL.Query().Get("worker_id")
+		if workerID == "" {
+			http.Error(w, "worker_id is required", http.StatusBadRequest)
+			return
+		}
+
+		Verbose("worker", "destroying worker "+workerID)
+
+		err := docker.DestroyWorker(workerID)
+		if err != nil {
+			Verbose("worker", "failed to destroy: "+err.Error())
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		Verbose("worker", "destroyed worker "+workerID)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "destroyed"})
+	}
+}
+
 func RegisterWithMaster(cfg AgentConfig) error {
 	body, err := json.Marshal(AgentRegistrationRequest{
 		AgentID: cfg.AgentID,

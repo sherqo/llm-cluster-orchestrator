@@ -187,3 +187,18 @@ func (d *DockerManager) CleanWorkers() (int, error) {
 
 	return count, nil
 }
+
+func (d *DockerManager) DestroyWorker(workerID string) error {
+	ctx := context.Background()
+
+	// We can find the container by its name "llm-" + workerID
+	name := "llm-" + workerID
+	
+	// Just forcefully remove it
+	err := d.client.ContainerRemove(ctx, name, container.RemoveOptions{Force: true})
+	if err != nil {
+		return err
+	}
+	
+	return nil
+}

@@ -10,7 +10,7 @@ This guide is the exact sequence used to bring everything up on one machine.
 
 ## One-time setup
 
-1) Build the worker image (needs CPU torch):
+1) Build the worker image:
 
 ```bash
 docker build -t llm-worker:latest ./worker
@@ -41,12 +41,7 @@ The agent will:
 - Start Ollama if it is not running.
 - Start Chroma via Docker compose in `vector-db/`.
 - Register itself with the master (with backoff if master is not ready yet).
-
-## Spawn a worker
-
-```bash
-curl -X POST http://127.0.0.1:9000/workers/create
-```
+- Automatically spawn one worker container.
 
 ## Send a test request
 
@@ -59,5 +54,5 @@ curl -X POST http://127.0.0.1:8080/chat \
 ## Troubleshooting
 
 - If Chroma build fails, verify Docker is running.
-- If worker creation fails, ensure `llm-worker:latest` exists.
-- If chat fails with `connect: connection refused`, verify the worker container is running and the master has added it.
+- If chat fails with `connect: connection refused`, verify Ollama is running (`curl http://127.0.0.1:11434/api/tags`).
+- If the model is not found, pull it: `ollama pull smollm:135m`.

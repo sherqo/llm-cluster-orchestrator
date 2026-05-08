@@ -10,6 +10,7 @@ import (
 	pb "master/generated"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
@@ -86,7 +87,7 @@ func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (s
 	defer w.activeRequests.Add(-1)
 
 	//TODO: the timeout should be tier aware so pro get longer timouts than free users
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	resp, err := w.client.Handle(ctx, &pb.Request{
@@ -101,6 +102,13 @@ func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (s
 	}
 
 	return resp.Reply, nil
+}
+
+func (w *Worker) Ping() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := w.client.Ping(ctx, &pb.PingRequest{})
+	return err
 }
 
 func (w *Worker) isRoutable() bool {

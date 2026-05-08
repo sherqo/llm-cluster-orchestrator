@@ -63,6 +63,9 @@ class Worker(worker_pb2_grpc.WorkerServiceServicer):
     def __init__(self):
         self.queue = PriorityQueue()
 
+    def Ping(self, request, context):
+        return worker_pb2.PingResponse(status="ok")
+
     def Handle(self, request, context):
         #  determine priority from tier
         # master sends 0 for pro, 1 for free

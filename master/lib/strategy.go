@@ -55,6 +55,13 @@ func (r *Router) pickLeastConnections() (*Worker, error) {
 	if best == nil {
 		return nil, ErrNoWorkersAvailable
 	}
+	
+	// Enforce capacity limit: if the best worker already has 50+ active requests,
+	// consider the whole cluster full to trigger autoscaling and 503 early.
+	if minActive >= 50 {
+		return nil, ErrNoWorkersAvailable
+	}
+	
 	return best, nil
 }
 
@@ -86,6 +93,9 @@ func (r *Router) pickRoundRobin() (*Worker, error) {
 	}
 
 	if selected != nil {
+		if selected.ActiveRequests() >= 50 {
+			return nil, ErrNoWorkersAvailable
+		}
 		r.rrCounter.Add(1)
 		return selected, nil
 	}

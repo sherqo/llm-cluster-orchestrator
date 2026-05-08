@@ -52,6 +52,9 @@ func Serve(router *Router) {
 		agentRegisterHandler(w, r, router)
 	})
 
+	go autoscaleLoop(router)
+	go healthCheckLoop(router)
+
 	log.Println("LB listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
@@ -173,4 +176,61 @@ func spawnWorkerForAgent(router *Router, req AgentRegisterRequest) {
 
 	router.AddWorkerWithInstance(w)
 	log.Printf("worker %s verified and added via gRPC", result.Address)
+}
+
+func autoscaleLoop(router *Router) {
+	for {
+		time.Sleep(5 * time.Second)
+
+		inFlight := router.InFlightCount()
+		workerCount := router.WorkerCount()
+		
+		// If no workers, we can't autoscale properly unless we have agents
+		if workerCount == 0 {
+			continue
+		}
+
+		// Calculate load: if we have more than 10 inflight per worker, we need more workers
+		if inFlight > workerCount * 10 {
+			monitoring.Verbose("autoscale", fmt.Sprintf("high load detected: %d inflight, %d workers", inFlight, workerCount))
+			
+			agents := router.GetAgents()
+			if len(agents) > 0 {
+				// Pick the first agent for simplicity in scaling
+				agent := agents[0]
+				monitoring.Verbose("autoscale", "requesting new worker from agent "+agent.AgentID)
+				
+				// Create a fake request to reuse spawnWorkerForAgent
+				req := AgentRegisterRequest{
+					AgentID: agent.AgentID,
+					Host:    agent.Host,
+					Port:    agent.Port,
+				}
+				go spawnWorkerForAgent(router, req)
+			}
+		}
+	}
+}
+
+func healthCheckLoop(router *Router) {
+	for {
+		time.Sleep(5 * time.Second)
+
+		router.workersM.RLock()
+		workersToPing := make([]*Worker, 0, len(router.workers))
+		for _, w := range router.workers {
+			workersToPing = append(workersToPing, w)
+		}
+		router.workersM.RUnlock()
+
+		for _, w := range workersToPing {
+			err := w.Ping()
+			if err != nil {
+				monitoring.Verbose("health", "worker "+w.ID()+" ping failed: "+err.Error())
+				w.SetDraining()
+			} else {
+				w.MarkHealthy()
+			}
+		}
+	}
 }

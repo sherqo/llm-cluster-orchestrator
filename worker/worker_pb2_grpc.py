@@ -39,12 +39,23 @@ class WorkerServiceStub(object):
                 request_serializer=worker__pb2.Request.SerializeToString,
                 response_deserializer=worker__pb2.Response.FromString,
                 _registered_method=True)
+        self.Ping = channel.unary_unary(
+                '/generated.WorkerService/Ping',
+                request_serializer=worker__pb2.PingRequest.SerializeToString,
+                response_deserializer=worker__pb2.PingResponse.FromString,
+                _registered_method=True)
 
 
 class WorkerServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def Handle(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Ping(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -57,6 +68,11 @@ def add_WorkerServiceServicer_to_server(servicer, server):
                     servicer.Handle,
                     request_deserializer=worker__pb2.Request.FromString,
                     response_serializer=worker__pb2.Response.SerializeToString,
+            ),
+            'Ping': grpc.unary_unary_rpc_method_handler(
+                    servicer.Ping,
+                    request_deserializer=worker__pb2.PingRequest.FromString,
+                    response_serializer=worker__pb2.PingResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -86,6 +102,33 @@ class WorkerService(object):
             '/generated.WorkerService/Handle',
             worker__pb2.Request.SerializeToString,
             worker__pb2.Response.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Ping(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/generated.WorkerService/Ping',
+            worker__pb2.PingRequest.SerializeToString,
+            worker__pb2.PingResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -34,6 +34,11 @@ func main() {
 		CreateWorkerHandler(docker),
 	)
 
+	http.HandleFunc(
+		"/workers/destroy",
+		DestroyWorkerHandler(docker),
+	)
+
 	if cfg.MasterURL != "" {
 		go func() {
 			if err := RegisterWithMaster(cfg); err != nil {
