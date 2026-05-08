@@ -44,10 +44,13 @@ func NewDockerManager(cfg AgentConfig) (*DockerManager, error) {
 func (d *DockerManager) CreateWorker(
 	req CreateWorkerRequest,
 ) (CreateWorkerResponse, error) {
+	Verbose("docker", "creating worker with image "+d.cfg.WorkerImage)
+
 	image := d.cfg.WorkerImage
 
 	hostPort, err := d.allocateHostPort()
 	if err != nil {
+		Verbose("docker", "failed to allocate port: "+err.Error())
 		return CreateWorkerResponse{}, err
 	}
 
@@ -58,6 +61,7 @@ func (d *DockerManager) CreateWorker(
 		time.Now().UnixMilli(),
 	)
 	name := "llm-" + workerID
+	Verbose("docker", "worker ID: "+workerID+", host port: "+strconv.Itoa(hostPort))
 
 	port := nat.Port(strconv.Itoa(workerContainerPort) + "/tcp")
 	env := append([]string{}, req.Env...)
@@ -101,8 +105,11 @@ func (d *DockerManager) CreateWorker(
 	)
 
 	if err != nil {
+		Verbose("docker", "failed to create container: "+err.Error())
 		return CreateWorkerResponse{}, err
 	}
+
+	Verbose("docker", "container created: "+resp.ID)
 
 	err = d.client.ContainerStart(
 		ctx,
@@ -111,16 +118,18 @@ func (d *DockerManager) CreateWorker(
 	)
 
 	if err != nil {
+		Verbose("docker", "failed to start container: "+err.Error())
 		_ = d.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 		return CreateWorkerResponse{}, err
 	}
 
+	Verbose("docker", "container started successfully")
+
 	return CreateWorkerResponse{
-		WorkerID:      workerID,
-		Address:       fmt.Sprintf("%s:%d", d.cfg.AdvertiseHost, hostPort),
-		HostPort:      hostPort,
-		ContainerPort: workerContainerPort,
-		ContainerID:   resp.ID,
+		WorkerID:    workerID,
+		Address:     fmt.Sprintf("%s:%d", d.cfg.AdvertiseHost, hostPort),
+		HostPort:    hostPort,
+		ContainerID: resp.ID,
 	}, nil
 }
 

@@ -15,7 +15,6 @@ import (
 
 type AgentInfo struct {
 	AgentID string
-	Address string
 	Host    string
 	Port    int
 	AddedAt time.Time
