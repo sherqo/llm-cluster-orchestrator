@@ -116,24 +116,35 @@ func RegisterWithMaster(cfg AgentConfig) error {
 	Verbose("register", "registering agent "+cfg.AgentID+" with master "+cfg.MasterURL)
 
 	client := http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(
-		cfg.MasterURL+"/agents/register",
-		"application/json",
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		Verbose("register", "failed: "+err.Error())
-		return err
-	}
-	defer resp.Body.Close()
+	maxAttempts := 6
+	backoff := 1 * time.Second
 
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		err := fmt.Errorf("master registration failed with status %d", resp.StatusCode)
-		Verbose("register", "failed: "+err.Error())
-		return err
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		resp, err := client.Post(
+			cfg.MasterURL+"/agents/register",
+			"application/json",
+			bytes.NewReader(body),
+		)
+		if err == nil {
+			if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+				resp.Body.Close()
+				Verbose("register", "registered agent "+cfg.AgentID+" with master "+cfg.MasterURL)
+				log.Printf("registered agent %s with master %s", cfg.AgentID, cfg.MasterURL)
+				return nil
+			}
+			resp.Body.Close()
+			err = fmt.Errorf("master registration failed with status %d", resp.StatusCode)
+		}
+
+		if attempt == maxAttempts {
+			Verbose("register", "failed: "+err.Error())
+			return err
+		}
+
+		Verbose("register", fmt.Sprintf("retry %d/%d after error: %v", attempt, maxAttempts, err))
+		time.Sleep(backoff)
+		backoff *= 2
 	}
 
-	Verbose("register", "registered agent "+cfg.AgentID+" with master "+cfg.MasterURL)
-	log.Printf("registered agent %s with master %s", cfg.AgentID, cfg.MasterURL)
-	return nil
+	return fmt.Errorf("master registration failed after retries")
 }

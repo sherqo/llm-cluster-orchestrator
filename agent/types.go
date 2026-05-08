@@ -9,6 +9,8 @@ type AgentConfig struct {
 	WorkerImage     string
 	WorkerPortStart int
 	WorkerPortEnd   int
+	OllamaURL       string
+	ChromaURL       string
 }
 
 type AgentRegistrationRequest struct {

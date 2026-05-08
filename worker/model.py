@@ -3,6 +3,7 @@ import requests
 
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "smollm:135m")
 OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "120"))
+OLLAMA_URL = os.getenv("OLLAMA_URL", "").strip()
 
 WORKER_TO_OLLAMA_PORT = {
     50051: 11435,
@@ -16,6 +17,8 @@ def get_ollama_port(worker_port: int) -> int:
 
 
 def get_ollama_url(worker_port: int) -> str:
+    if OLLAMA_URL:
+        return OLLAMA_URL
     return f"http://127.0.0.1:{get_ollama_port(worker_port)}"
 
 

@@ -6,36 +6,29 @@ import numpy as np
 import requests
 from sentence_transformers import SentenceTransformer
 
-CHROMA_URL      = "http://localhost:8000"
-COLLECTION_NAME = "documents"
-TOP_K           = 2
-MAX_CHUNK_CHARS = 150
+CHROMA_URL = os.getenv("CHROMA_URL", "http://localhost:8000")
+COLLECTION_NAME = os.getenv("CHROMA_COLLECTION", "documents")
+TOP_K = int(os.getenv("RAG_TOP_K", "2"))
+MAX_CHUNK_CHARS = int(os.getenv("RAG_MAX_CHARS", "150"))
 
 print("[rag] loading embedding model...")
-# Use smallest fastest model
 embedder = SentenceTransformer("paraphrase-MiniLM-L3-v2")
 print("[rag] embedding model loaded.")
 
-# ─────────────────────────────────────────────
-# PRE-EMBED ALL DOCUMENTS ONCE AT STARTUP
-# Instead of searching ChromaDB on every request,
-# we load all docs once, embed them all at once,
-# and do fast in-memory search using numpy
-# ─────────────────────────────────────────────
+
 def _load_documents():
     try:
         col_resp = requests.get(
             f"{CHROMA_URL}/api/v1/collections/{COLLECTION_NAME}",
-            timeout=5
+            timeout=5,
         )
         if col_resp.status_code != 200:
-            print(f"[rag] WARNING: collection not found — RAG disabled")
+            print("[rag] WARNING: collection not found — RAG disabled")
             return None, None
 
         col_id = col_resp.json()["id"]
         print(f"[rag] connected — collection='{COLLECTION_NAME}' id={col_id}")
 
-        # get all documents
         docs_resp = requests.post(
             f"{CHROMA_URL}/api/v1/collections/{col_id}/get",
             json={"include": ["documents"]},
@@ -49,10 +42,8 @@ def _load_documents():
             print("[rag] WARNING: no documents found")
             return None, None
 
-        # pre-embed all documents once
         print(f"[rag] pre-embedding {len(docs)} documents...")
         doc_embeddings = embedder.encode(docs, convert_to_numpy=True, batch_size=32)
-        # normalize for fast cosine similarity
         doc_embeddings = doc_embeddings / np.linalg.norm(doc_embeddings, axis=1, keepdims=True)
         print(f"[rag] ready — {len(docs)} documents embedded in memory")
         return docs, doc_embeddings
@@ -62,7 +53,6 @@ def _load_documents():
         return None, None
 
 
-# runs once at startup
 DOCUMENTS, DOC_EMBEDDINGS = _load_documents()
 
 
@@ -71,11 +61,9 @@ def retrieve(prompt: str, top_k: int = TOP_K) -> str:
         return ""
 
     try:
-        # embed query
         query_vec = embedder.encode([prompt], convert_to_numpy=True)[0]
         query_vec = query_vec / np.linalg.norm(query_vec)
 
-        # cosine similarity — fast numpy dot product
         scores = DOC_EMBEDDINGS @ query_vec
         top_indices = np.argsort(scores)[::-1][:top_k]
 

@@ -45,7 +45,9 @@ func NewWorker(id, addr string) (*Worker, error) {
 	backoff := 500 * time.Millisecond
 
 	for i := 0; i < maxAttempts; i++ {
-		conn, err = grpc.NewClient(
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		conn, err = grpc.DialContext(
+			ctx,
 			addr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{
@@ -53,7 +55,9 @@ func NewWorker(id, addr string) (*Worker, error) {
 				Timeout:             3 * time.Second,
 				PermitWithoutStream: true,
 			}),
+			grpc.WithBlock(),
 		)
+		cancel()
 
 		if err == nil {
 			break

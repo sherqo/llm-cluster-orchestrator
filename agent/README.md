@@ -112,17 +112,20 @@ Called automatically at agent startup (if `--master-url` is set). Registers the 
 
 | Flag | Default | Description |
 |---|---|---|
-| `--listen` | `:8080` | Agent HTTP listen address |
+| `--listen` | `:9000` | Agent HTTP listen address |
 | `--advertise-host` | auto-detected | LAN IP the master can use to reach this agent |
 | `--advertise-port` | from `--listen` | LAN port the master can use to reach this agent |
 | `--master-url` | `""` | Master HTTP base URL (enables registration) |
 | `--worker-image` | `llm-worker:latest` | Default Docker image for workers |
 | `--worker-port-start` | `50051` | Start of host port range for worker gRPC |
 | `--worker-port-end` | `50150` | End of host port range for worker gRPC |
+| `--ollama-url` | `http://127.0.0.1:11434` | Shared Ollama base URL passed to workers |
+| `--chroma-url` | `http://127.0.0.1:8000` | Shared Chroma base URL passed to workers |
 
 ## Responsibilities
 
 1. **Monitor system resources** — report CPU, memory, and OS info via `/system/info`
 2. **Manage worker containers** — spin up Docker workers and return their gRPC address to the master via `/workers/create`
 3. **Register with the master** — announce availability on startup so the master can route tasks to this agent
-
+4. **Start shared Ollama** — if `--ollama-url` is set and Ollama is not running, the agent will start it locally
+5. **Start shared Chroma** — if `--chroma-url` is set and Chroma is not running, the agent will start it via Docker compose

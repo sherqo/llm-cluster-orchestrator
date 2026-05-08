@@ -69,7 +69,14 @@ func (d *DockerManager) CreateWorker(
 		env,
 		"WORKER_ID="+workerID,
 		fmt.Sprintf("WORKER_PORT=%d", workerContainerPort),
+		"MASTER_URL="+d.cfg.MasterURL,
 	)
+	if d.cfg.OllamaURL != "" {
+		env = append(env, "OLLAMA_URL="+d.cfg.OllamaURL)
+	}
+	if d.cfg.ChromaURL != "" {
+		env = append(env, "CHROMA_URL="+d.cfg.ChromaURL)
+	}
 
 	ctx := context.Background()
 

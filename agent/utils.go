@@ -12,12 +12,14 @@ func readConfig() (AgentConfig, error) {
 	var cfg AgentConfig
 
 	flag.StringVar(&cfg.MasterURL, "master-url", "", "master HTTP base URL")
-	flag.StringVar(&cfg.ListenAddr, "listen", ":8080", "agent listen address")
+	flag.StringVar(&cfg.ListenAddr, "listen", ":9000", "agent listen address")
 	flag.StringVar(&cfg.AdvertiseHost, "advertise-host", "", "LAN host/IP the master can use to reach this agent")
 	flag.IntVar(&cfg.AdvertisePort, "advertise-port", 0, "LAN port the master can use to reach this agent")
 	flag.StringVar(&cfg.WorkerImage, "worker-image", "llm-worker:latest", "Docker image to use for worker containers")
 	flag.IntVar(&cfg.WorkerPortStart, "worker-port-start", 50051, "first host port to publish worker gRPC")
 	flag.IntVar(&cfg.WorkerPortEnd, "worker-port-end", 50150, "last host port to publish worker gRPC")
+	flag.StringVar(&cfg.OllamaURL, "ollama-url", "http://127.0.0.1:11434", "shared Ollama base URL")
+	flag.StringVar(&cfg.ChromaURL, "chroma-url", "http://127.0.0.1:8000", "shared Chroma base URL")
 	flag.Parse()
 
 	Verbose("config", "parsing flags")
@@ -47,6 +49,12 @@ func readConfig() (AgentConfig, error) {
 		return AgentConfig{}, err
 	}
 
+	if cfg.MasterURL == "" {
+		err := fmt.Errorf("master url is required; pass --master-url")
+		Verbose("config", err.Error())
+		return AgentConfig{}, err
+	}
+
 	cfg.MasterURL = strings.TrimRight(cfg.MasterURL, "/")
 	cfg.AgentID = fmt.Sprintf("agent-%s-%d", cfg.AdvertiseHost, cfg.AdvertisePort)
 
@@ -54,6 +62,8 @@ func readConfig() (AgentConfig, error) {
 	Verbose("config", "master URL: "+cfg.MasterURL)
 	Verbose("config", "listen: "+cfg.ListenAddr)
 	Verbose("config", "worker port range: "+strconv.Itoa(cfg.WorkerPortStart)+"-"+strconv.Itoa(cfg.WorkerPortEnd))
+	Verbose("config", "ollama url: "+cfg.OllamaURL)
+	Verbose("config", "chroma url: "+cfg.ChromaURL)
 
 	return cfg, nil
 }

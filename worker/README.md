@@ -10,4 +10,5 @@ my firts thinking about the workers that each worker will be a process that will
 
 but for the worker implementation, i don't really know. i was thinking about running `ollama` instance in each worker. but will this be effiecient? This requires more research
 
-what i am seeing now is the best thing is to start a single ollama instance by the agent for each machine
+current approach: the agent starts a single shared Ollama instance on the machine and passes its URL to all workers via `OLLAMA_URL`. the worker only connects to that shared instance.
+RAG is handled by the worker using ChromaDB + sentence-transformers and runs locally in the worker process.

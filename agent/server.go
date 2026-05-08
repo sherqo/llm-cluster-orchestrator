@@ -11,6 +11,14 @@ func main() {
 		log.Fatal(err)
 	}
 
+	if err := startOllama(cfg); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := startChroma(cfg); err != nil {
+		log.Fatal(err)
+	}
+
 	docker, err := NewDockerManager(cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -30,11 +38,6 @@ func main() {
 	http.HandleFunc(
 		"/workers/create",
 		CreateWorkerHandler(docker),
-	)
-
-	http.HandleFunc(
-		"/clean",
-		CleanWorkerHandler(docker),
 	)
 
 	log.Println("agent listening on " + cfg.ListenAddr)
