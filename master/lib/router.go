@@ -13,6 +13,13 @@ import (
 	"time"
 )
 
+type AgentInfo struct {
+	AgentID string
+	Host    string
+	Port    int
+	AddedAt time.Time
+}
+
 var ErrNoWorkersAvailable = errors.New("no workers available")
 var ErrWorkerFailed = errors.New("worker failed")
 
@@ -29,6 +36,9 @@ type Router struct {
 	workers  map[string]*Worker
 	workersM sync.RWMutex
 
+	agents  map[string]*AgentInfo
+	agentsM sync.RWMutex
+
 	inFlight  map[string]InFlight
 	inFlightM sync.RWMutex
 
@@ -43,9 +53,16 @@ type Router struct {
 func NewRouter() *Router {
 	return &Router{
 		workers:  make(map[string]*Worker),
+		agents:   make(map[string]*AgentInfo),
 		inFlight: make(map[string]InFlight),
 		strategy: StrategyLeastConnections,
 	}
+}
+
+func (r *Router) RegisterAgent(info AgentInfo) {
+	r.agentsM.Lock()
+	defer r.agentsM.Unlock()
+	r.agents[info.AgentID] = &info
 }
 
 func (r *Router) AddWorker(addr string) {
@@ -59,6 +76,29 @@ func (r *Router) AddWorker(addr string) {
 		return
 	}
 	r.workers[id] = w
+}
+
+func (r *Router) AddWorkerWithInstance(w *Worker) {
+	r.workersM.Lock()
+	defer r.workersM.Unlock()
+	r.workers[w.id] = w
+}
+
+func (r *Router) WorkerCount() int {
+	r.workersM.RLock()
+	defer r.workersM.RUnlock()
+	return len(r.workers)
+}
+
+func (r *Router) GetAgents() []*AgentInfo {
+	r.agentsM.RLock()
+	defer r.agentsM.RUnlock()
+
+	agents := make([]*AgentInfo, 0, len(r.agents))
+	for _, a := range r.agents {
+		agents = append(agents, a)
+	}
+	return agents
 }
 
 func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatRequest) (ChatResponse, error) {
@@ -103,7 +143,10 @@ func (r *Router) StartCircuitRecoveryLoop() {
 			r.workersM.RUnlock()
 
 			for _, worker := range workers {
-				worker.maybeHalfOpen()
+				// Try to recover suspected workers back to healthy
+				worker.MaybeRecoverFromSuspected()
+				// Try to resurrect dead workers back to suspected
+				worker.MaybeResurrectFromDead()
 			}
 		}
 	}()
