@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -23,11 +24,33 @@ type ChatResponse struct {
 	Reply     string `json:"reply"`
 }
 
+type WorkerRegisterRequest struct {
+	Addr   string  `json:"addr"`
+	Weight float64 `json:"weight"`
+}
+
+type WorkerRegisterResponse struct {
+	WorkerID string `json:"workerId"`
+	Status   string `json:"status"`
+}
+
+type AgentRegisterRequest struct {
+	AgentID string `json:"agent_id"`
+	Address string `json:"address"`
+	Host    string `json:"host"`
+	Port    int    `json:"port"`
+}
+
 // main server loop
 func Serve(router *Router) {
 	http.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
 		chatRequestHandler(w, r, router)
 	})
+
+	http.HandleFunc("/agents/register", func(w http.ResponseWriter, r *http.Request) {
+		agentRegisterHandler(w, r, router)
+	})
+
 	log.Println("LB listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
@@ -82,4 +105,31 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router) 
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp) // send the request back to the client
+}
+
+func agentRegisterHandler(w http.ResponseWriter, r *http.Request, router *Router) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req AgentRegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		Verbose("server", "invalid agent registration JSON")
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	Verbose("server", "agent registration: "+req.AgentID+" at "+req.Address)
+
+	router.RegisterAgent(AgentInfo{
+		AgentID: req.AgentID,
+		Address: req.Address,
+		Host:    req.Host,
+		Port:    req.Port,
+		AddedAt: time.Now(),
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
 }
