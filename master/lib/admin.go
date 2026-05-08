@@ -11,16 +11,13 @@ var ErrWorkerNotFound = errors.New("worker not found")
 type WorkerSnapshot struct {
 	ID             string
 	Addr           string
-	Weight         float64
 	Status         WorkerStatus
-	CircuitState   CircuitState
 	Failures       int64
 	Successes      int64
 	ActiveRequests int64
-	LoadScore      float64
 }
 
-func (r *Router) AddWorkerWithWeight(addr string, weight float64) error {
+func (r *Router) AddWorker(addr string) error {
 	id := "worker-" + addr
 
 	r.workersM.Lock()
@@ -30,7 +27,7 @@ func (r *Router) AddWorkerWithWeight(addr string, weight float64) error {
 		return fmt.Errorf("worker already exists: %s", id)
 	}
 
-	w, err := NewWorker(id, addr, weight)
+	w, err := NewWorker(id, addr)
 	if err != nil {
 		return err
 	}

@@ -168,7 +168,7 @@ func (m model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.lastError = "address cannot be empty"
 				return m, nil
 			}
-			if err := m.router.AddWorkerWithWeight(addr, 1); err != nil {
+			if err := m.router.AddWorker(addr); err != nil {
 				m.lastError = err.Error()
 			} else {
 				m.status = "added worker-" + addr
@@ -219,9 +219,6 @@ func (m *model) cycleStrategy() {
 		m.router.SetStrategy(lib.StrategyRoundRobin)
 		m.status = "strategy: round_robin"
 	case lib.StrategyRoundRobin:
-		m.router.SetStrategy(lib.StrategyWeightedLeastLoad)
-		m.status = "strategy: weighted_least_load"
-	default:
 		m.router.SetStrategy(lib.StrategyLeastConnections)
 		m.status = "strategy: least_connections"
 	}
@@ -272,14 +269,14 @@ func (m model) renderWorkers() string {
 	var b strings.Builder
 	b.WriteString("\nWorkers\n")
 	b.WriteString("--------------------------------------------------------------------------------\n")
-	b.WriteString("Sel  ID                          Addr                Status    Circuit   Active\n")
+	b.WriteString("Sel  ID                          Addr                Status    Active\n")
 	for i, w := range m.snap.workers {
 		sel := " "
 		if i == m.selected {
 			sel = ">"
 		}
-		b.WriteString(fmt.Sprintf("%s    %-27s %-19s %-9s %-9s %6d\n",
-			sel, trim(w.ID, 27), trim(w.Addr, 19), w.Status, w.CircuitState, w.ActiveRequests))
+		b.WriteString(fmt.Sprintf("%s    %-27s %-19s %-9s %6d\n",
+			sel, trim(w.ID, 27), trim(w.Addr, 19), w.Status, w.ActiveRequests))
 	}
 	if len(m.snap.workers) == 0 {
 		b.WriteString("(no workers)\n")
