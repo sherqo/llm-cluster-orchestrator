@@ -78,6 +78,29 @@ func (r *Router) AddWorker(addr string) {
 	r.workers[id] = w
 }
 
+func (r *Router) AddWorkerWithInstance(w *Worker) {
+	r.workersM.Lock()
+	defer r.workersM.Unlock()
+	r.workers[w.id] = w
+}
+
+func (r *Router) WorkerCount() int {
+	r.workersM.RLock()
+	defer r.workersM.RUnlock()
+	return len(r.workers)
+}
+
+func (r *Router) GetAgents() []*AgentInfo {
+	r.agentsM.RLock()
+	defer r.agentsM.RUnlock()
+
+	agents := make([]*AgentInfo, 0, len(r.agents))
+	for _, a := range r.agents {
+		agents = append(agents, a)
+	}
+	return agents
+}
+
 func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatRequest) (ChatResponse, error) {
 	var lastErr error
 

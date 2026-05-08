@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -117,7 +118,7 @@ func agentRegisterHandler(w http.ResponseWriter, r *http.Request, router *Router
 		return
 	}
 
-	Verbose("server", "agent registration: "+req.AgentID+" at "+req.Address)
+	Verbose("server", "agent registration: "+req.AgentID+" at "+req.Host+":"+strconv.Itoa(req.Port))
 
 	router.RegisterAgent(AgentInfo{
 		AgentID: req.AgentID,
