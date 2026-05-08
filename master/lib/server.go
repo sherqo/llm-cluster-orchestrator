@@ -36,7 +36,6 @@ type WorkerRegisterResponse struct {
 
 type AgentRegisterRequest struct {
 	AgentID string `json:"agent_id"`
-	Address string `json:"address"`
 	Host    string `json:"host"`
 	Port    int    `json:"port"`
 }
@@ -124,7 +123,6 @@ func agentRegisterHandler(w http.ResponseWriter, r *http.Request, router *Router
 
 	router.RegisterAgent(AgentInfo{
 		AgentID: req.AgentID,
-		Address: req.Address,
 		Host:    req.Host,
 		Port:    req.Port,
 		AddedAt: time.Now(),
