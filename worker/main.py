@@ -137,17 +137,17 @@ class Worker(worker_pb2_grpc.WorkerServiceServicer):
         self.queue = PriorityQueue()
 
     def Handle(self, request, context):
-        # Step 1: determine priority from tier
+        #  determine priority from tier
         # master sends 0 for pro, 1 for free
         priority = request.priority if request.priority in (0, 1) else 1
         tier = "pro" if priority == 0 else "free"
 
         print(f"[worker:{WORKER_PORT}] received  request_id={request.request_id} tier={tier}")
 
-        # Step 2: push into priority queue
+        #  push into priority queue
         self.queue.push(priority, request.request_id, request.message)
 
-        # Step 3: pop highest priority item
+        #  pop highest priority item
         item = self.queue.pop()
         if item is None:
             context.abort(grpc.StatusCode.INTERNAL, "queue unexpectedly empty")
@@ -156,13 +156,13 @@ class Worker(worker_pb2_grpc.WorkerServiceServicer):
         _, req_id, message = item
         print(f"[worker:{WORKER_PORT}] handling  request_id={req_id}")
 
-        # Step 4: RAG — retrieve relevant context from ChromaDB
+        #  RAG — retrieve relevant context from ChromaDB
         rag_context = retrieve(message)
 
-        # Step 5: run this worker's private Ollama model instance
+        #  run this worker's private Ollama model instance
         reply = run_model(prompt=message, context=rag_context, worker_port=WORKER_PORT)
 
-        # Step 6: return response + current queue depth (piggybacked)
+        #  return response + current queue depth (piggybacked)
         depth = self.queue.size()
         print(f"[worker:{WORKER_PORT}] done      request_id={req_id} queue_depth={depth}")
 
@@ -183,7 +183,7 @@ def serve():
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     worker_pb2_grpc.add_WorkerServiceServicer_to_server(worker, server)
-    server.add_insecure_port(f"[::]:{WORKER_PORT}")
+    server.add_insecure_port(f"localhost:{WORKER_PORT}")
     server.start()
     print(f"[worker:{WORKER_PORT}] running")
     server.wait_for_termination()
