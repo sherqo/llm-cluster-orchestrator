@@ -12,10 +12,13 @@ from model import run_model, get_ollama_url, OLLAMA_MODEL
 
 # ─────────────────────────────────────────────
 # CONFIG
-# python main.py 50051
-# python main.py 50052
 # ─────────────────────────────────────────────
-WORKER_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 50051
+import os
+worker_port_env = os.getenv("WORKER_PORT")
+if worker_port_env:
+    WORKER_PORT = int(worker_port_env)
+else:
+    WORKER_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 50051
 
 
 def _is_ollama_alive(url: str) -> bool:
@@ -109,7 +112,7 @@ def serve():
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     worker_pb2_grpc.add_WorkerServiceServicer_to_server(worker, server)
-    server.add_insecure_port(f"localhost:{WORKER_PORT}")
+    server.add_insecure_port(f"0.0.0.0:{WORKER_PORT}")
     server.start()
     print(f"[worker:{WORKER_PORT}] running")
     server.wait_for_termination()

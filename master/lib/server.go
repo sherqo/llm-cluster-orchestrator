@@ -1,8 +1,10 @@
 package lib
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -128,6 +130,47 @@ func agentRegisterHandler(w http.ResponseWriter, r *http.Request, router *Router
 		AddedAt: time.Now(),
 	})
 
+	go spawnWorkerForAgent(router, req)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
+}
+
+func spawnWorkerForAgent(router *Router, req AgentRegisterRequest) {
+	agentAddr := fmt.Sprintf("http://%s:%d", req.Host, req.Port)
+	log.Printf("requesting worker from agent at %s", agentAddr)
+
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(agentAddr+"/workers/create", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		log.Printf("failed to create worker from agent: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		log.Printf("agent worker creation failed with status %d", resp.StatusCode)
+		return
+	}
+
+	var result struct {
+		WorkerID string `json:"worker_id"`
+		Address  string `json:"address"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Printf("failed to decode worker response: %v", err)
+		return
+	}
+
+	log.Printf("worker created: %s at %s", result.WorkerID, result.Address)
+
+	workerID := "worker-" + result.Address
+	w, err := NewWorker(workerID, result.Address)
+	if err != nil {
+		log.Printf("failed to verify worker: %v", err)
+		return
+	}
+
+	router.AddWorkerWithInstance(w)
+	log.Printf("worker %s verified and added via gRPC", result.Address)
 }

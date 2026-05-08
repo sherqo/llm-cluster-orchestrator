@@ -24,12 +24,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if cfg.MasterURL != "" {
-		if err := RegisterWithMaster(cfg); err != nil {
-			log.Fatal(err)
-		}
-	}
-
 	http.HandleFunc(
 		"/system/info",
 		SystemInfoHandler,
@@ -39,6 +33,14 @@ func main() {
 		"/workers/create",
 		CreateWorkerHandler(docker),
 	)
+
+	if cfg.MasterURL != "" {
+		go func() {
+			if err := RegisterWithMaster(cfg); err != nil {
+				log.Printf("agent registration failed: %v", err)
+			}
+		}()
+	}
 
 	log.Println("agent listening on " + cfg.ListenAddr)
 

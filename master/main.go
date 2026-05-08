@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"master/lib"
+	"master/tui"
 )
 
 func main() {
@@ -27,6 +28,9 @@ func main() {
 		fmt.Println("no workers available at startup")
 	}
 
-	lib.Serve(router)
+	go lib.Serve(router)
+	
+	if err := tui.Run(router); err != nil {
+		fmt.Printf("Error starting TUI: %v\n", err)
+	}
 }
-

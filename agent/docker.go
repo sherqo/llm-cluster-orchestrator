@@ -63,12 +63,12 @@ func (d *DockerManager) CreateWorker(
 	name := "llm-" + workerID
 	Verbose("docker", "worker ID: "+workerID+", host port: "+strconv.Itoa(hostPort))
 
-	port := nat.Port(strconv.Itoa(workerContainerPort) + "/tcp")
+	_ = nat.Port(strconv.Itoa(workerContainerPort) + "/tcp")
 	env := append([]string{}, req.Env...)
 	env = append(
 		env,
 		"WORKER_ID="+workerID,
-		fmt.Sprintf("WORKER_PORT=%d", workerContainerPort),
+		fmt.Sprintf("WORKER_PORT=%d", hostPort),
 		"MASTER_URL="+d.cfg.MasterURL,
 	)
 	if d.cfg.OllamaURL != "" {
@@ -83,9 +83,8 @@ func (d *DockerManager) CreateWorker(
 	resp, err := d.client.ContainerCreate(
 		ctx,
 		&container.Config{
-			Image:        image,
-			Env:          env,
-			ExposedPorts: nat.PortSet{port: struct{}{}},
+			Image: image,
+			Env:   env,
 			Labels: map[string]string{
 				"llm.cluster.role":      "worker",
 				"llm.cluster.agent_id":  d.cfg.AgentID,
@@ -94,14 +93,7 @@ func (d *DockerManager) CreateWorker(
 			},
 		},
 		&container.HostConfig{
-			PortBindings: nat.PortMap{
-				port: []nat.PortBinding{
-					{
-						HostIP:   "0.0.0.0",
-						HostPort: strconv.Itoa(hostPort),
-					},
-				},
-			},
+			NetworkMode: container.NetworkMode("host"),
 			RestartPolicy: container.RestartPolicy{
 				Name: "unless-stopped",
 			},
