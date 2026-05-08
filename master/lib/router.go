@@ -13,6 +13,14 @@ import (
 	"time"
 )
 
+type AgentInfo struct {
+	AgentID string
+	Address string
+	Host    string
+	Port    int
+	AddedAt time.Time
+}
+
 var ErrNoWorkersAvailable = errors.New("no workers available")
 var ErrWorkerFailed = errors.New("worker failed")
 
@@ -29,6 +37,9 @@ type Router struct {
 	workers  map[string]*Worker
 	workersM sync.RWMutex
 
+	agents  map[string]*AgentInfo
+	agentsM sync.RWMutex
+
 	inFlight  map[string]InFlight
 	inFlightM sync.RWMutex
 
@@ -43,9 +54,16 @@ type Router struct {
 func NewRouter() *Router {
 	return &Router{
 		workers:  make(map[string]*Worker),
+		agents:   make(map[string]*AgentInfo),
 		inFlight: make(map[string]InFlight),
 		strategy: StrategyLeastConnections,
 	}
+}
+
+func (r *Router) RegisterAgent(info AgentInfo) {
+	r.agentsM.Lock()
+	defer r.agentsM.Unlock()
+	r.agents[info.AgentID] = &info
 }
 
 func (r *Router) AddWorker(addr string) {
