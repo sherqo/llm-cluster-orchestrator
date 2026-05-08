@@ -28,14 +28,11 @@ import (
 func main() {
 	router := lib.NewRouter()
 
-	// start circuit breaker recovery loop
-	router.StartCircuitRecoveryLoop()
-
 	// auto-verify workers at startup
 	workerPorts := []string{"localhost:50051", "localhost:50052", "localhost:50053"}
 	for _, addr := range workerPorts {
 		workerID := "worker-" + addr
-		w, err := lib.NewWorker(workerID, addr, 1)
+		w, err := lib.NewWorker(workerID, addr)
 		if err != nil {
 			log.Printf("worker %s not available: %v", addr, err)
 			continue
@@ -88,7 +85,7 @@ func tryCreateWorkerFromAgent(router *lib.Router) {
 
 	// verify worker via gRPC
 	workerID := "worker-" + result.Address
-	w, err := lib.NewWorker(workerID, result.Address, 1)
+	w, err := lib.NewWorker(workerID, result.Address)
 	if err != nil {
 		log.Printf("failed to verify worker: %v", err)
 		return

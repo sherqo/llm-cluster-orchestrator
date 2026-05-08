@@ -26,8 +26,7 @@ type ChatResponse struct {
 }
 
 type WorkerRegisterRequest struct {
-	Addr   string  `json:"addr"`
-	Weight float64 `json:"weight"`
+	Addr string `json:"addr"`
 }
 
 type WorkerRegisterResponse struct {
@@ -115,12 +114,12 @@ func agentRegisterHandler(w http.ResponseWriter, r *http.Request, router *Router
 
 	var req AgentRegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		Verbose("server", "invalid agent registration JSON")
+		monitoring.Verbose("server", "invalid agent registration JSON")
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	Verbose("server", "agent registration: "+req.AgentID+" at "+req.Host+":"+strconv.Itoa(req.Port))
+	monitoring.Verbose("server", "agent registration: "+req.AgentID+" at "+req.Host+":"+strconv.Itoa(req.Port))
 
 	router.RegisterAgent(AgentInfo{
 		AgentID: req.AgentID,

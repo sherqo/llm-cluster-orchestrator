@@ -17,23 +17,18 @@ import (
 type WorkerStatus string
 
 const (
-	WorkerHealthy   WorkerStatus = "healthy"   // worker is healthy and can receive requests
-	WorkerSuspected WorkerStatus = "suspected" // worker is suspected to be unhealthy (e.g. failed requests) but not confirmed yet
-	WorkerDraining  WorkerStatus = "draining"  // worker is being drained and should not receive new requests, but can finish existing ones and then be removed
-	WorkerDead      WorkerStatus = "dead"      // worker is confirmed to be unhealthy and should be removed
+	WorkerHealthy  WorkerStatus = "healthy"  // worker is healthy and can receive requests
+	WorkerDraining WorkerStatus = "draining" // worker is being drained and should not receive new requests, but can finish existing ones and then be removed
 )
 
 // worker struct represents a worker server
 type Worker struct {
-	id     string  // unique identifier for the worker, eg: "worker-localhost:50051"
-	addr   string  // address of the worker server, eg: "localhost:50051"
-	weight float64 // weight for load balancing, higher means more requests will be routed to this worker
+	id   string // unique identifier for the worker, eg: "worker-localhost:50051"
+	addr string // address of the worker server, eg: "localhost:50051"
 
 	activeRequests atomic.Int64
 
-	status              WorkerStatus
-	statusChangedAt     time.Time // timestamp when status last changed
-	consecutiveFailures int64     // track consecutive failures to determine if suspected
+	status WorkerStatus
 
 	// gRPC client and connection
 	client pb.WorkerServiceClient
@@ -42,11 +37,7 @@ type Worker struct {
 }
 
 // constructor
-func NewWorker(id, addr string, weight float64) (*Worker, error) {
-	if weight <= 0 {
-		weight = 1
-	}
-
+func NewWorker(id, addr string) (*Worker, error) {
 	var conn *grpc.ClientConn
 	var err error
 	// i am keeping the server connection open and it will ping every 5s
@@ -77,13 +68,11 @@ func NewWorker(id, addr string, weight float64) (*Worker, error) {
 	}
 
 	return &Worker{
-		id:             id,
-		addr:           addr,
-		weight:         weight,
-		status:         WorkerHealthy,
-		statusChangedAt: time.Now(),
-		conn:           conn,
-		client:         pb.NewWorkerServiceClient(conn),
+		id:     id,
+		addr:   addr,
+		status: WorkerHealthy,
+		conn:   conn,
+		client: pb.NewWorkerServiceClient(conn),
 	}, nil
 }
 
@@ -110,17 +99,6 @@ func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (s
 	return resp.Reply, nil
 }
 
-// idk about this
-func (w *Worker) loadScore() float64 {
-	active := w.activeRequests.Load()
-
-	w.mu.RLock()
-	weight := w.weight
-	w.mu.RUnlock()
-
-	return float64(active) / weight
-}
-
 func (w *Worker) isRoutable() bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -141,79 +119,16 @@ func (w *Worker) GetStatus() WorkerStatus {
 	return w.status
 }
 
-func (w *Worker) MarkSuspected() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.status == WorkerDead {
-		return
-	}
-
-	if w.status == WorkerSuspected {
-		w.status = WorkerDead
-		w.statusChangedAt = time.Now()
-		return
-	}
-	w.status = WorkerSuspected
-	w.statusChangedAt = time.Now()
-	w.consecutiveFailures++
-}
-
 func (w *Worker) MarkHealthy() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.status == WorkerDead {
-		return
-	}
 	w.status = WorkerHealthy
-	w.statusChangedAt = time.Now()
-	w.consecutiveFailures = 0
 }
 
 func (w *Worker) MarkDraining() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.status == WorkerDead {
-		return
-	}
 	w.status = WorkerDraining
-	w.statusChangedAt = time.Now()
-}
-
-// MaybeRecoverFromSuspected attempts to recover a suspected worker back to healthy status
-// after a timeout period has elapsed. This allows temporary failures to not permanently kill workers.
-func (w *Worker) MaybeRecoverFromSuspected() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if w.status != WorkerSuspected {
-		return
-	}
-
-	// If suspected for more than 30 seconds, try to recover it back to healthy
-	if time.Since(w.statusChangedAt) >= 30*time.Second {
-		w.status = WorkerHealthy
-		w.statusChangedAt = time.Now()
-		w.consecutiveFailures = 0
-	}
-}
-
-// MaybeResurrectFromDead attempts to resurrect a dead worker after a long timeout period
-// This is a last-resort recovery mechanism for workers that have been dead for a long time
-func (w *Worker) MaybeResurrectFromDead() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if w.status != WorkerDead {
-		return
-	}
-
-	// If dead for more than 5 minutes, try to resurrect it back to suspected
-	// so it gets another chance
-	if time.Since(w.statusChangedAt) >= 5*time.Minute {
-		w.status = WorkerSuspected
-		w.statusChangedAt = time.Now()
-		w.consecutiveFailures = 0
-	}
 }
 
 func (w *Worker) Snapshot() WorkerSnapshot {
@@ -223,67 +138,16 @@ func (w *Worker) Snapshot() WorkerSnapshot {
 	return WorkerSnapshot{
 		ID:             w.id,
 		Addr:           w.addr,
-		Weight:         w.weight,
 		Status:         w.status,
-		CircuitState:   w.circuitState,
-		Failures:       w.failures,
-		Successes:      w.successes,
+		Failures:       0,
+		Successes:      0,
 		ActiveRequests: w.activeRequests.Load(),
-		LoadScore:      float64(w.activeRequests.Load()) / w.weight,
 	}
 }
 
 func (w *Worker) SetDraining() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.status == WorkerDead {
-		return
-	}
-	w.status = WorkerDraining
-}
-
-func (w *Worker) Close() error {
-	if w.conn == nil {
-		return nil
-	}
-	return w.conn.Close()
-}
-
-func (w *Worker) ID() string {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.id
-}
-
-func (w *Worker) Addr() string {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.addr
-}
-
-func (w *Worker) Snapshot() WorkerSnapshot {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-
-	return WorkerSnapshot{
-		ID:             w.id,
-		Addr:           w.addr,
-		Weight:         w.weight,
-		Status:         w.status,
-		CircuitState:   w.circuitState,
-		Failures:       w.failures,
-		Successes:      w.successes,
-		ActiveRequests: w.activeRequests.Load(),
-		LoadScore:      float64(w.activeRequests.Load()) / w.weight,
-	}
-}
-
-func (w *Worker) SetDraining() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.status == WorkerDead {
-		return
-	}
 	w.status = WorkerDraining
 }
 

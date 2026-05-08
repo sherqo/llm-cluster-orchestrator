@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"master/monitoring"
 )
 
 type AgentInfo struct {
@@ -26,9 +28,8 @@ var ErrWorkerFailed = errors.New("worker failed")
 type Strategy string
 
 const (
-	StrategyRoundRobin        = "round_robin"
-	StrategyLeastConnections  = "least_connections"
-	StrategyWeightedLeastLoad = "weighted_least_load"
+	StrategyRoundRobin       = "round_robin"
+	StrategyLeastConnections = "least_connections"
 )
 
 // main router struct
@@ -39,8 +40,7 @@ type Router struct {
 	agents  map[string]*AgentInfo
 	agentsM sync.RWMutex
 
-	inFlight  map[string]InFlight
-	inFlightM sync.RWMutex
+	inflight *monitoring.InFlightStore
 
 	strategy  Strategy
 	strategyM sync.RWMutex
@@ -54,7 +54,7 @@ func NewRouter() *Router {
 	return &Router{
 		workers:  make(map[string]*Worker),
 		agents:   make(map[string]*AgentInfo),
-		inFlight: make(map[string]InFlight),
+		inflight: monitoring.NewInFlightStore(),
 		strategy: StrategyLeastConnections,
 	}
 }
@@ -63,19 +63,6 @@ func (r *Router) RegisterAgent(info AgentInfo) {
 	r.agentsM.Lock()
 	defer r.agentsM.Unlock()
 	r.agents[info.AgentID] = &info
-}
-
-func (r *Router) AddWorker(addr string) {
-	id := "worker-" + addr
-
-	r.workersM.Lock()
-	defer r.workersM.Unlock()
-
-	w, err := NewWorker(id, addr, 1)
-	if err != nil {
-		return
-	}
-	r.workers[id] = w
 }
 
 func (r *Router) AddWorkerWithInstance(w *Worker) {
@@ -119,7 +106,6 @@ func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatReque
 			return ChatResponse{RequestID: requestID, Reply: reply}, nil
 		}
 
-		worker.MarkSuspected()
 		lastErr = sendErr
 	}
 
@@ -130,24 +116,22 @@ func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatReque
 	return ChatResponse{}, ErrNoWorkersAvailable
 }
 
-func (r *Router) StartCircuitRecoveryLoop() {
-	ticker := time.NewTicker(1 * time.Second)
+func (r *Router) AddInFlight(requestID, workerAddr string) {
+	r.inflight.Add(requestID, workerAddr)
+}
 
-	go func() {
-		for range ticker.C {
-			r.workersM.RLock()
-			workers := make([]*Worker, 0, len(r.workers))
-			for _, worker := range r.workers {
-				workers = append(workers, worker)
-			}
-			r.workersM.RUnlock()
+func (r *Router) RemoveInFlight(requestID string) {
+	r.inflight.Remove(requestID)
+}
 
-			for _, worker := range workers {
-				// Try to recover suspected workers back to healthy
-				worker.MaybeRecoverFromSuspected()
-				// Try to resurrect dead workers back to suspected
-				worker.MaybeResurrectFromDead()
-			}
-		}
-	}()
+func (r *Router) InFlightCount() int {
+	return r.inflight.Count()
+}
+
+func (r *Router) InFlightSnapshot() []monitoring.InFlight {
+	return r.inflight.GetAll()
+}
+
+func (r *Router) InFlightRecent(limit int) []monitoring.CompletedFlight {
+	return r.inflight.Recent(limit)
 }
