@@ -161,3 +161,30 @@ func isPortAvailable(port int) bool {
 	_ = ln.Close()
 	return true
 }
+
+func (d *DockerManager) CleanWorkers() (int, error) {
+	ctx := context.Background()
+
+	containers, err := d.client.ContainerList(ctx, container.ListOptions{
+		All: true,
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	count := 0
+	for _, c := range containers {
+		if c.Image == d.cfg.WorkerImage {
+			Verbose("clean", "removing container "+c.ID[:12])
+
+			err := d.client.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true})
+			if err != nil {
+				Verbose("clean", "failed to remove "+c.ID[:12]+": "+err.Error())
+				continue
+			}
+			count++
+		}
+	}
+
+	return count, nil
+}

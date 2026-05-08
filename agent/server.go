@@ -32,6 +32,11 @@ func main() {
 		CreateWorkerHandler(docker),
 	)
 
+	http.HandleFunc(
+		"/clean",
+		CleanWorkerHandler(docker),
+	)
+
 	log.Println("agent listening on " + cfg.ListenAddr)
 
 	err = http.ListenAndServe(cfg.ListenAddr, nil)
