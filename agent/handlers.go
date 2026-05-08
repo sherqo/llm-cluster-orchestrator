@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -70,6 +71,35 @@ func CreateWorkerHandler(
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+func CleanWorkerHandler(
+	docker *DockerManager,
+) http.HandlerFunc {
+
+	return func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		Verbose("clean", "cleaning all workers with image "+docker.cfg.WorkerImage)
+
+		count, err := docker.CleanWorkers()
+		if err != nil {
+			Verbose("clean", "failed: "+err.Error())
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		Verbose("clean", "removed "+strconv.Itoa(count)+" containers")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]int{"removed": count})
 	}
 }
 
