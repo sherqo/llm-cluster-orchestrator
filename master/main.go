@@ -21,10 +21,10 @@ import (
 func main() {
 	router := lib.NewRouter() // create new LB and add routers to it
 
-	// manually for now 
+	// manually for now
 	router.AddWorker("localhost:50051")
 	router.AddWorker("localhost:50052")
-	//router.AddWorker("localhost:50053")
-	
+	// router.AddWorker("localhost:50053")
+
 	lib.Serve(router)
 }

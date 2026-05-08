@@ -1,29 +1,16 @@
-"""
-rag.py — RAG Module
-Embeds the query using sentence-transformers then
-searches ChromaDB for the most relevant document chunks.
-"""
+import os
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
 import requests
-from sentence_transformers import SentenceTransformer
 
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
 CHROMA_URL      = "http://localhost:8000"
 COLLECTION_NAME = "documents"
-TOP_K           = 3
+TOP_K           = 2
+MAX_CHUNK_CHARS = 150
 
-# Load the same embedding model used when seeding ChromaDB
-# Must match what was used to embed the documents!
-print("[rag] loading embedding model...")
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
-print("[rag] embedding model loaded.")
+print("[rag] connecting to ChromaDB...")
 
 
-# ─────────────────────────────────────────────
-# Get collection ID once at startup
-# ─────────────────────────────────────────────
 def _get_collection_id() -> str:
     try:
         resp = requests.get(
@@ -32,10 +19,10 @@ def _get_collection_id() -> str:
         )
         if resp.status_code == 200:
             col_id = resp.json()["id"]
-            print(f"[rag] connected to ChromaDB — collection='{COLLECTION_NAME}' id={col_id}")
+            print(f"[rag] connected — collection='{COLLECTION_NAME}' id={col_id}")
             return col_id
         else:
-            print(f"[rag] WARNING: collection '{COLLECTION_NAME}' not found — RAG disabled")
+            print(f"[rag] WARNING: collection not found — RAG disabled")
             return None
     except Exception as e:
         print(f"[rag] WARNING: ChromaDB unreachable: {e}")
@@ -44,44 +31,42 @@ def _get_collection_id() -> str:
 COLLECTION_ID = _get_collection_id()
 
 
-# ─────────────────────────────────────────────
-# RETRIEVE
-# ─────────────────────────────────────────────
 def retrieve(prompt: str, top_k: int = TOP_K) -> str:
-    """
-    Embeds the prompt locally, then queries ChromaDB
-    with the embedding vector to find similar documents.
-    """
     if not COLLECTION_ID:
-        print("[rag] skipping — no collection available")
         return ""
 
     try:
-        # Step 1: embed the query into a vector
-        query_vector = embedder.encode([prompt])[0].tolist()
-
-        # Step 2: send the vector to ChromaDB
         resp = requests.post(
-            f"{CHROMA_URL}/api/v1/collections/{COLLECTION_ID}/query",
-            json={
-                "query_embeddings": [query_vector],  # vector, not text
-                "n_results": top_k,
-            },
+            f"{CHROMA_URL}/api/v1/collections/{COLLECTION_ID}/get",
+            json={"include": ["documents"]},
             timeout=10,
         )
-
         if resp.status_code != 200:
-            print(f"[rag] query failed: {resp.status_code} — {resp.text}")
             return ""
 
-        chunks = resp.json().get("documents", [[]])[0]
-
-        if not chunks:
-            print("[rag] no relevant chunks found")
+        all_docs = resp.json().get("documents", [])
+        if not all_docs:
             return ""
 
-        context = "\n\n".join(f"[{i+1}] {chunk}" for i, chunk in enumerate(chunks))
-        print(f"[rag] retrieved {len(chunks)} chunks for: '{prompt[:60]}'")
+        stopwords = {"a","an","the","is","are","was","were","what","why",
+                     "how","when","where","who","in","on","of","to","and","or"}
+        keywords = [w for w in prompt.lower().split()
+                    if w not in stopwords and len(w) > 2]
+
+        scored = []
+        for doc in all_docs:
+            score = sum(1 for kw in keywords if kw in doc.lower())
+            if score > 0:
+                scored.append((score, doc))
+
+        scored.sort(reverse=True)
+        top_docs = [doc[:MAX_CHUNK_CHARS] for _, doc in scored[:top_k]]
+
+        if not top_docs:
+            return ""
+
+        context = "\n".join(f"[{i+1}] {doc}" for i, doc in enumerate(top_docs))
+        print(f"[rag] retrieved {len(top_docs)} chunks for: '{prompt[:60]}'")
         return context
 
     except Exception as e:
