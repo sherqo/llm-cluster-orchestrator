@@ -20,7 +20,9 @@ type AgentRegistrationRequest struct {
 }
 
 type CreateWorkerRequest struct {
-	Env []string `json:"env,omitempty"`
+	Env         []string `json:"env,omitempty"`
+	CallbackURL string   `json:"callback_url,omitempty"` // master endpoint to POST when worker is ready
+	AgentID     string   `json:"agent_id,omitempty"`     // agent ID to echo back in callback
 }
 
 type CreateWorkerResponse struct {

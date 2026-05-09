@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,6 +44,24 @@ type AgentRegisterRequest struct {
 	Port    int    `json:"port"`
 }
 
+// WorkerReadyNotification is the callback payload the agent POSTs to /workers/ready
+// once the worker container is up and its gRPC port is reachable.
+type WorkerReadyNotification struct {
+	WorkerID    string `json:"worker_id"`
+	Address     string `json:"address"`
+	AgentID     string `json:"agent_id"`
+	ContainerID string `json:"container_id"`
+}
+
+// masterBaseURL returns the externally-reachable base URL for this master.
+// Read from MASTER_URL env var; falls back to http://localhost:8080.
+func masterBaseURL() string {
+	if u := os.Getenv("MASTER_URL"); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	return "http://localhost:8080"
+}
+
 // main server loop
 func Serve(router *Router) {
 	// Initialize the metrics collector (#13)
@@ -52,8 +72,9 @@ func Serve(router *Router) {
 	admissionCfg := DefaultAdmissionConfig()
 	admission := NewAdmissionController(admissionCfg, metrics)
 
-	// Initialize the autoscaler with production defaults (#1, #3, #4, #8, #9, #10, #11, #14)
+	// Initialize the autoscaler with production defaults (#1,#3,#4,#8,#9,#10,#11,#14)
 	autoscalerCfg := DefaultAutoscalerConfig()
+	autoscalerCfg.CallbackBaseURL = masterBaseURL()
 	autoscaler := NewAutoscaler(autoscalerCfg, router, metrics)
 
 	http.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
@@ -61,21 +82,27 @@ func Serve(router *Router) {
 	})
 
 	http.HandleFunc("/agents/register", func(w http.ResponseWriter, r *http.Request) {
-		agentRegisterHandler(w, r, router)
+		agentRegisterHandler(w, r, router, autoscalerCfg.CallbackBaseURL)
 	})
 
-	// Start the autoscaler instead of the old autoscaleLoop
+	// Async callback: agent POSTs here when a worker container is ready
+	http.HandleFunc("/workers/ready", func(w http.ResponseWriter, r *http.Request) {
+		workerReadyHandler(w, r, router)
+	})
+
 	go autoscaler.Run()
 	go healthCheckLoop(router)
 	go admissionUpdateLoop(router, admission)
 
-	log.Println("LB listening on :8080")
+	log.Printf("LB listening on :8080 (callback base: %s)", autoscalerCfg.CallbackBaseURL)
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-// chatRequestHandler with admission control (#12) and metrics recording (#2, #13)
+// ---------------------------------------------------------------------------
+// /chat
+// ---------------------------------------------------------------------------
+
 func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router, admission *AdmissionController, metrics *MetricsCollector) {
-	// http checks
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -89,11 +116,9 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router, 
 	}
 
 	monitoring.Verbose("server", "received chat request, userId="+req.UserID+", tier="+req.Tier)
-
-	// Record the incoming request for metrics (#13)
 	metrics.RecordRequest()
 
-	// Admission control: gate the request (#12)
+	// Admission control (#12)
 	release, admitErr := admission.Admit(r.Context())
 	if admitErr != nil {
 		switch {
@@ -113,7 +138,6 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router, 
 	}
 	defer release()
 
-	// generate a unique request ID
 	requestID, err := uuid.NewV7()
 	if err != nil {
 		monitoring.Verbose("server", "failed to generate request id: "+err.Error())
@@ -124,14 +148,11 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router, 
 	requestIDStr := requestID.String()
 	monitoring.Verbose("server", "assigned requestId="+requestIDStr)
 
-	// Track latency for metrics (#2, #13)
 	start := time.Now()
 
-	// handle the request and send errors
 	resp, err := router.HandleChat(r.Context(), requestIDStr, req)
 	if err != nil {
 		metrics.RecordError()
-
 		switch {
 		case errors.Is(err, ErrNoWorkersAvailable):
 			monitoring.Verbose("server", "no workers available")
@@ -146,17 +167,18 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router, 
 		return
 	}
 
-	// Record latency (#2, #5, #13)
-	latency := time.Since(start).Seconds()
-	metrics.RecordLatency(latency)
-
+	metrics.RecordLatency(time.Since(start).Seconds())
 	monitoring.Verbose("server", "request completed, reqId="+resp.RequestID+" reply="+resp.Reply)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp) // send the request back to the client
+	json.NewEncoder(w).Encode(resp)
 }
 
-func agentRegisterHandler(w http.ResponseWriter, r *http.Request, router *Router) {
+// ---------------------------------------------------------------------------
+// /agents/register
+// ---------------------------------------------------------------------------
+
+func agentRegisterHandler(w http.ResponseWriter, r *http.Request, router *Router, callbackBase string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -178,74 +200,112 @@ func agentRegisterHandler(w http.ResponseWriter, r *http.Request, router *Router
 		AddedAt: time.Now(),
 	})
 
-	go spawnWorkerForAgent(router, req)
+	// Fire-and-forget: ask the agent to create an initial worker.
+	// The agent will call /workers/ready when the container is up.
+	go fireSpawnRequest(req.AgentID, fmt.Sprintf("http://%s:%d", req.Host, req.Port), callbackBase)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
 }
 
-// spawnWorkerForAgent spawns a worker on a specific agent with retry (#11).
-func spawnWorkerForAgent(router *Router, req AgentRegisterRequest) {
-	agentAddr := fmt.Sprintf("http://%s:%d", req.Host, req.Port)
-	log.Printf("requesting worker from agent at %s", agentAddr)
+// ---------------------------------------------------------------------------
+// /workers/ready  — async callback from the agent
+// ---------------------------------------------------------------------------
 
-	// Retry with exponential backoff (#11)
+func workerReadyHandler(w http.ResponseWriter, r *http.Request, router *Router) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var note WorkerReadyNotification
+	if err := json.NewDecoder(r.Body).Decode(&note); err != nil {
+		monitoring.Verbose("server", "invalid worker-ready JSON: "+err.Error())
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	monitoring.Verbose("server", fmt.Sprintf(
+		"worker-ready callback: worker_id=%s address=%s agent=%s",
+		note.WorkerID, note.Address, note.AgentID,
+	))
+
+	// Register the worker — the port is already open so NewWorker connects quickly
+	workerID := "worker-" + note.Address
+	wk, err := NewWorker(workerID, note.Address)
+	if err != nil {
+		monitoring.Verbose("server", "worker-ready: gRPC connect failed for "+note.Address+": "+err.Error())
+		http.Error(w, "gRPC connect failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	wk.SetAgentID(note.AgentID)
+	router.AddWorkerWithInstance(wk)
+
+	log.Printf("[server] worker %s registered via callback (agent: %s)", note.Address, note.AgentID)
+	monitoring.Verbose("server", "worker "+note.Address+" added via callback, agent="+note.AgentID)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "registered", "worker_id": workerID})
+}
+
+// ---------------------------------------------------------------------------
+// Fire-and-forget spawn helpers (used by registration path and autoscaler)
+// ---------------------------------------------------------------------------
+
+// fireSpawnRequest sends a /workers/create to the agent with a callback URL.
+// It returns after the agent acknowledges receipt (202) — not after the worker is ready.
+// Retries up to 3 times with 5s backoff on network errors.
+func fireSpawnRequest(agentID, agentAddr, callbackBase string) {
+	callbackURL := callbackBase + "/workers/ready"
+	log.Printf("[server] firing spawn request to %s (callback: %s)", agentAddr, callbackURL)
+
+	body, _ := json.Marshal(map[string]string{
+		"callback_url": callbackURL,
+		"agent_id":     agentID,
+	})
+
 	maxAttempts := 3
-	backoff := 1 * time.Second
+	backoff := 5 * time.Second
+	client := http.Client{Timeout: 10 * time.Second} // just delivery ack
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		err := trySpawnWorker(router, agentAddr, req.AgentID)
-		if err == nil {
+		resp, err := client.Post(agentAddr+"/workers/create", "application/json", bytes.NewReader(body))
+		if err != nil {
+			monitoring.Verbose("server", fmt.Sprintf(
+				"spawn fire attempt %d/%d to %s failed: %v", attempt, maxAttempts, agentID, err,
+			))
+			if attempt < maxAttempts {
+				time.Sleep(backoff)
+				backoff *= 2
+			}
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusAccepted || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
+			monitoring.Verbose("server", fmt.Sprintf(
+				"spawn request accepted by agent %s (status %d) — waiting for callback",
+				agentID, resp.StatusCode,
+			))
 			return
 		}
 
-		log.Printf("spawn attempt %d/%d failed on agent %s: %v", attempt, maxAttempts, req.AgentID, err)
-		monitoring.Verbose("server", fmt.Sprintf("spawn attempt %d/%d failed: %v", attempt, maxAttempts, err))
-
+		monitoring.Verbose("server", fmt.Sprintf(
+			"spawn fire attempt %d/%d to %s got status %d", attempt, maxAttempts, agentID, resp.StatusCode,
+		))
 		if attempt < maxAttempts {
 			time.Sleep(backoff)
 			backoff *= 2
 		}
 	}
 
-	log.Printf("all %d spawn attempts failed for agent %s", maxAttempts, req.AgentID)
+	log.Printf("[server] all spawn fire attempts failed for agent %s", agentID)
 }
 
-func trySpawnWorker(router *Router, agentAddr, agentID string) error {
-	client := http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(agentAddr+"/workers/create", "application/json", bytes.NewReader([]byte("{}")))
-	if err != nil {
-		return fmt.Errorf("failed to create worker from agent: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("agent worker creation failed with status %d", resp.StatusCode)
-	}
-
-	var result struct {
-		WorkerID string `json:"worker_id"`
-		Address  string `json:"address"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode worker response: %w", err)
-	}
-
-	log.Printf("worker created: %s at %s", result.WorkerID, result.Address)
-
-	workerID := "worker-" + result.Address
-	w, err := NewWorker(workerID, result.Address)
-	if err != nil {
-		return fmt.Errorf("failed to verify worker: %w", err)
-	}
-
-	// Track which agent spawned this worker (#10)
-	w.SetAgentID(agentID)
-
-	router.AddWorkerWithInstance(w)
-	log.Printf("worker %s verified and added via gRPC (agent: %s)", result.Address, agentID)
-	return nil
-}
+// ---------------------------------------------------------------------------
+// Background loops
+// ---------------------------------------------------------------------------
 
 func healthCheckLoop(router *Router) {
 	for {
@@ -254,7 +314,6 @@ func healthCheckLoop(router *Router) {
 		router.workersM.RLock()
 		workersToPing := make([]*Worker, 0, len(router.workers))
 		for _, w := range router.workers {
-			// Only health-check workers that are in routable states
 			state := w.GetLifecycleState()
 			if state == StateHealthy || state == StateWarming {
 				workersToPing = append(workersToPing, w)
@@ -268,7 +327,6 @@ func healthCheckLoop(router *Router) {
 				monitoring.Verbose("health", "worker "+w.ID()+" ping failed: "+err.Error())
 				w.SetDraining()
 			} else {
-				// If worker was warming, promote to healthy
 				if w.GetLifecycleState() == StateWarming {
 					w.MarkHealthy()
 					monitoring.Verbose("health", "worker "+w.ID()+" warmed up, now healthy")
@@ -280,7 +338,6 @@ func healthCheckLoop(router *Router) {
 	}
 }
 
-// admissionUpdateLoop periodically updates admission limits based on healthy worker count.
 func admissionUpdateLoop(router *Router, admission *AdmissionController) {
 	for {
 		time.Sleep(2 * time.Second)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -67,11 +68,81 @@ func CreateWorkerHandler(
 			return
 		}
 
-		Verbose("worker", "created worker "+resp.WorkerID+" at "+resp.Address)
+		Verbose("worker", "container started: "+resp.WorkerID+" at "+resp.Address)
 
+		// If a callback URL was provided, asynchronously wait for the worker
+		// gRPC port to be ready, then POST the result back to the master.
+		// The master does NOT block here — it gets a 202 Accepted immediately.
+		if req.CallbackURL != "" {
+			go waitAndCallback(resp, req.CallbackURL, req.AgentID)
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(map[string]string{
+				"status":    "accepted",
+				"worker_id": resp.WorkerID,
+				"address":   resp.Address,
+			})
+			return
+		}
+
+		// Legacy: synchronous response (no callback)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
+}
+
+// waitAndCallback polls until the worker's gRPC port is reachable (max 100s),
+// then POSTs the worker-ready notification to the master's callback URL.
+func waitAndCallback(resp CreateWorkerResponse, callbackURL, agentID string) {
+	Verbose("worker", "waiting for worker "+resp.WorkerID+" to be ready at "+resp.Address)
+
+	if err := waitForPort(resp.Address, 100*time.Second); err != nil {
+		Verbose("worker", "worker "+resp.WorkerID+" never became ready: "+err.Error())
+		return
+	}
+
+	Verbose("worker", "worker "+resp.WorkerID+" is ready, notifying master")
+
+	payload, err := json.Marshal(map[string]string{
+		"worker_id":    resp.WorkerID,
+		"address":      resp.Address,
+		"agent_id":     agentID,
+		"container_id": resp.ContainerID,
+	})
+	if err != nil {
+		Verbose("worker", "failed to marshal callback payload: "+err.Error())
+		return
+	}
+
+	client := http.Client{Timeout: 10 * time.Second}
+	httpResp, err := client.Post(callbackURL, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		Verbose("worker", "callback to master failed: "+err.Error())
+		return
+	}
+	defer httpResp.Body.Close()
+
+	Verbose("worker", fmt.Sprintf("callback sent for %s, master responded %d", resp.WorkerID, httpResp.StatusCode))
+}
+
+// waitForPort TCP-polls addr (host:port) until it accepts connections or timeout elapses.
+func waitForPort(addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	backoff := 500 * time.Millisecond
+
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(backoff)
+		if backoff < 5*time.Second {
+			backoff += 500 * time.Millisecond
+		}
+	}
+	return fmt.Errorf("port %s not reachable after %s", addr, timeout)
 }
 
 func CleanWorkerHandler(

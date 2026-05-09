@@ -119,6 +119,39 @@ func (r *Router) GetAgents() []*AgentInfo {
 	return agents
 }
 
+// AgentSnapshot is a point-in-time view of an agent for the TUI.
+type AgentSnapshot struct {
+	AgentID     string
+	Host        string
+	Port        int
+	WorkerCount int
+	AddedAt     time.Time
+}
+
+// AgentsSnapshot returns a snapshot of all agents with their worker counts.
+func (r *Router) AgentsSnapshot() []AgentSnapshot {
+	r.agentsM.RLock()
+	agents := make([]*AgentInfo, 0, len(r.agents))
+	for _, a := range r.agents {
+		agents = append(agents, a)
+	}
+	r.agentsM.RUnlock()
+
+	workerCounts := r.WorkerCountByAgent()
+
+	out := make([]AgentSnapshot, 0, len(agents))
+	for _, a := range agents {
+		out = append(out, AgentSnapshot{
+			AgentID:     a.AgentID,
+			Host:        a.Host,
+			Port:        a.Port,
+			WorkerCount: workerCounts[a.AgentID],
+			AddedAt:     a.AddedAt,
+		})
+	}
+	return out
+}
+
 func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatRequest) (ChatResponse, error) {
 	var lastErr error
 

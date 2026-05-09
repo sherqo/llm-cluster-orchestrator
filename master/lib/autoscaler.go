@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"net/http"
 	"sync"
@@ -72,6 +71,10 @@ type AutoscalerConfig struct {
 	SpawnMaxRetries     int           // max retries for worker spawning
 	SpawnRetryBackoff   time.Duration // initial backoff duration
 	AgentFailurePenalty time.Duration // how long to penalize a failing agent
+
+	// Async callback: master's base URL the agent will POST to when the worker is ready.
+	// If empty, defaults to http://localhost:8080.
+	CallbackBaseURL string
 }
 
 // DefaultAutoscalerConfig returns sensible production defaults.
@@ -102,8 +105,10 @@ func DefaultAutoscalerConfig() AutoscalerConfig {
 		TickInterval: 5 * time.Second,
 
 		SpawnMaxRetries:     3,
-		SpawnRetryBackoff:   1 * time.Second,
-		AgentFailurePenalty: 60 * time.Second,
+		SpawnRetryBackoff:   2 * time.Second,
+		AgentFailurePenalty: 30 * time.Second,
+
+		CallbackBaseURL: "http://localhost:8080",
 	}
 }
 
@@ -173,8 +178,13 @@ func (as *Autoscaler) tick() {
 	// Collect fresh metrics
 	m := as.metrics.Collect(as.router)
 
-	// If no workers exist and we have agents, bootstrap minimum workers
+	// If no workers exist and we have agents, bootstrap minimum workers.
+	// Respect cooldown to prevent spamming when agents are unreachable.
 	if m.HealthyWorkers == 0 && m.TotalWorkers == 0 {
+		now := time.Now()
+		if !as.lastScaleUp.IsZero() && now.Sub(as.lastScaleUp) < as.cfg.ScaleUpCooldown {
+			return // still in cooldown from last attempt
+		}
 		agents := as.router.GetAgents()
 		if len(agents) > 0 && as.cfg.MinWorkers > 0 {
 			monitoring.Verbose("autoscaler", "no workers, bootstrapping minimum")
@@ -381,6 +391,10 @@ func (as *Autoscaler) scaleUp(count int, m ClusterMetrics) {
 	as.scalingMu.Lock()
 	defer as.scalingMu.Unlock()
 
+	// Always record the attempt time so cooldown is enforced even on failure.
+	// This prevents the bootstrap loop from spamming every tick when agents are down.
+	defer func() { as.lastScaleUp = time.Now() }()
+
 	monitoring.Verbose("autoscaler", fmt.Sprintf(
 		"scale-up: adding %d workers (util=%.2f, rps=%.1f, p95=%.2fs, queue=%.1f, healthy=%d)",
 		count, m.WorkerUtilization, m.RequestsPerSec, m.P95Latency, m.QueueDepth, m.HealthyWorkers,
@@ -388,7 +402,7 @@ func (as *Autoscaler) scaleUp(count int, m ClusterMetrics) {
 
 	agents := as.router.GetAgents()
 	if len(agents) == 0 {
-		monitoring.Verbose("autoscaler", "scale-up failed: no agents available")
+		monitoring.Verbose("autoscaler", "scale-up failed: no agents registered")
 		return
 	}
 
@@ -397,7 +411,10 @@ func (as *Autoscaler) scaleUp(count int, m ClusterMetrics) {
 		// Pick best agent (#10 — least workers, skip penalized)
 		agent := as.pickBestAgent(agents)
 		if agent == nil {
-			monitoring.Verbose("autoscaler", "no healthy agents available for scaling")
+			monitoring.Verbose("autoscaler", fmt.Sprintf(
+				"no eligible agents available (all %d agents penalized), will retry after cooldown",
+				len(agents),
+			))
 			break
 		}
 
@@ -412,9 +429,10 @@ func (as *Autoscaler) scaleUp(count int, m ClusterMetrics) {
 	}
 
 	if spawned > 0 {
-		as.lastScaleUp = time.Now()
 		as.highLoadSet = false
 		monitoring.Verbose("autoscaler", fmt.Sprintf("scale-up complete: spawned %d/%d workers", spawned, count))
+	} else {
+		monitoring.Verbose("autoscaler", fmt.Sprintf("scale-up failed: 0/%d workers spawned, cooldown %s", count, as.cfg.ScaleUpCooldown))
 	}
 }
 
@@ -597,37 +615,36 @@ func (as *Autoscaler) spawnWorkerWithRetry(agent *AgentInfo) error {
 }
 
 func (as *Autoscaler) spawnWorkerOnAgent(agentAddr, agentID string) error {
-	client := http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Post(agentAddr+"/workers/create", "application/json", bytes.NewReader([]byte("{}")))
+	// Fire-and-forget: send the create request to the agent with a callback URL.
+	// The agent starts the container async, polls until gRPC port is open,
+	// then POSTs to /workers/ready on the master. No blocking wait here.
+	callbackURL := as.cfg.CallbackBaseURL + "/workers/ready"
+
+	body, err := json.Marshal(map[string]string{
+		"callback_url": callbackURL,
+		"agent_id":     agentID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal spawn request: %w", err)
+	}
+
+	// 10s is enough for the HTTP delivery ack; agent responds 202 Accepted immediately
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(agentAddr+"/workers/create", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+	// Accept both 200 OK (legacy) and 202 Accepted (async path)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		return fmt.Errorf("agent returned status %d", resp.StatusCode)
 	}
 
-	var result struct {
-		WorkerID string `json:"worker_id"`
-		Address  string `json:"address"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	workerID := "worker-" + result.Address
-	w, err := NewWorker(workerID, result.Address)
-	if err != nil {
-		return fmt.Errorf("failed to connect to new worker: %w", err)
-	}
-
-	// Set the agent ID on the worker for tracking
-	w.SetAgentID(agentID)
-
-	as.router.AddWorkerWithInstance(w)
-	log.Printf("[autoscaler] worker %s spawned on agent %s", result.Address, agentID)
-
+	monitoring.Verbose("autoscaler", fmt.Sprintf(
+		"spawn request accepted by agent %s — waiting for /workers/ready callback",
+		agentID,
+	))
 	return nil
 }
 
@@ -648,10 +665,11 @@ func (as *Autoscaler) recordAgentFailure(agentID string) {
 	h.consecutiveFailures++
 	h.lastFailure = time.Now()
 
-	// Apply exponential penalty based on consecutive failures
+	// Apply escalating penalty: base * 2^(failures-1), capped at 5 minutes.
+	// First failure = 30s, second = 60s, third = 120s, etc.
 	penalty := as.cfg.AgentFailurePenalty * time.Duration(1<<uint(h.consecutiveFailures-1))
-	if penalty > 10*time.Minute {
-		penalty = 10 * time.Minute // cap at 10 minutes
+	if penalty > 5*time.Minute {
+		penalty = 5 * time.Minute
 	}
 	h.penalizedUntil = time.Now().Add(penalty)
 
