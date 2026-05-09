@@ -66,8 +66,8 @@ func startChromaDocker(cfg AgentConfig) (bool, error) {
 
 	// Try docker compose (V2) first, then fall back to docker-compose (V1)
 	cmds := [][]string{
-		{"docker", "compose", "up", "-d", "--build"},
-		{"docker-compose", "up", "-d", "--build"},
+		{"docker", "compose", "up", "-d"},
+		{"docker-compose", "up", "-d"},
 	}
 
 	for _, args := range cmds {

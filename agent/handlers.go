@@ -40,6 +40,8 @@ func SystemInfoHandler(
 
 func CreateWorkerHandler(
 	docker *DockerManager,
+	masterURL string,
+	agentID string,
 ) http.HandlerFunc {
 
 	return func(
@@ -70,11 +72,19 @@ func CreateWorkerHandler(
 
 		Verbose("worker", "container started: "+resp.WorkerID+" at "+resp.Address)
 
-		// If a callback URL was provided, asynchronously wait for the worker
+		// Use master URL from config as priority, only fallback to request's callback URL if config is empty
+		callbackURL := ""
+		if masterURL != "" {
+			callbackURL = masterURL + "/workers/ready"
+		} else if req.CallbackURL != "" {
+			callbackURL = req.CallbackURL
+		}
+		Verbose("worker", "final callbackURL: "+callbackURL)
+
+		// If a callback URL is available, asynchronously wait for the worker
 		// gRPC port to be ready, then POST the result back to the master.
-		// The master does NOT block here — it gets a 202 Accepted immediately.
-		if req.CallbackURL != "" {
-			go waitAndCallback(resp, req.CallbackURL, req.AgentID)
+		if callbackURL != "" {
+			go waitAndCallback(resp, callbackURL, agentID)
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
