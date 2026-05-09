@@ -269,14 +269,14 @@ func (m model) renderWorkers() string {
 	var b strings.Builder
 	b.WriteString("\nWorkers\n")
 	b.WriteString("--------------------------------------------------------------------------------\n")
-	b.WriteString("Sel  ID                          Addr                Status    Active\n")
+	b.WriteString("Sel  ID                          Addr                State     Active  Agent\n")
 	for i, w := range m.snap.workers {
 		sel := " "
 		if i == m.selected {
 			sel = ">"
 		}
-		b.WriteString(fmt.Sprintf("%s    %-27s %-19s %-9s %6d\n",
-			sel, trim(w.ID, 27), trim(w.Addr, 19), w.Status, w.ActiveRequests))
+		b.WriteString(fmt.Sprintf("%s    %-27s %-19s %-9s %6d  %s\n",
+			sel, trim(w.ID, 27), trim(w.Addr, 19), w.Lifecycle.String(), w.ActiveRequests, trim(w.AgentID, 12)))
 	}
 	if len(m.snap.workers) == 0 {
 		b.WriteString("(no workers)\n")

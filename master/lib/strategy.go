@@ -41,7 +41,7 @@ func (r *Router) pickLeastConnections() (*Worker, error) {
 	var minActive int64 = -1
 
 	for _, worker := range r.workers {
-		if !worker.IsHealthy() {
+		if !worker.isRoutable() {
 			continue
 		}
 
@@ -70,7 +70,7 @@ func (r *Router) pickRoundRobin() (*Worker, error) {
 	count := 0
 
 	for _, worker := range r.workers {
-		if !worker.IsHealthy() {
+		if !worker.isRoutable() {
 			continue
 		}
 		if count == int(r.rrCounter.Load()) {
@@ -84,7 +84,7 @@ func (r *Router) pickRoundRobin() (*Worker, error) {
 		// wrap around
 		r.rrCounter.Store(0)
 		for _, worker := range r.workers {
-			if !worker.IsHealthy() {
+			if !worker.isRoutable() {
 				continue
 			}
 			selected = worker

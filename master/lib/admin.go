@@ -11,10 +11,12 @@ var ErrWorkerNotFound = errors.New("worker not found")
 type WorkerSnapshot struct {
 	ID             string
 	Addr           string
-	Status         WorkerStatus
+	Status         WorkerStatus   // legacy status for backward compat
+	Lifecycle      LifecycleState // full lifecycle state (#6)
 	Failures       int64
 	Successes      int64
 	ActiveRequests int64
+	AgentID        string // which agent spawned this worker (#10)
 }
 
 func (r *Router) AddWorker(addr string) error {

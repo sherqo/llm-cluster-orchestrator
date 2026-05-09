@@ -1,5 +1,5 @@
 /*
-* This file contains the Load Balancer / Router logic for the master server.
+ * This file contains the Load Balancer / Router logic for the master server.
  */
 
 package lib
@@ -80,6 +80,34 @@ func (r *Router) WorkerCount() int {
 	return len(r.workers)
 }
 
+// HealthyWorkerCount returns the number of workers in HEALTHY state.
+func (r *Router) HealthyWorkerCount() int {
+	r.workersM.RLock()
+	defer r.workersM.RUnlock()
+	count := 0
+	for _, w := range r.workers {
+		if w.GetLifecycleState() == StateHealthy {
+			count++
+		}
+	}
+	return count
+}
+
+// WorkerCountByAgent returns a map of agent_id → number of workers from that agent (#10).
+func (r *Router) WorkerCountByAgent() map[string]int {
+	r.workersM.RLock()
+	defer r.workersM.RUnlock()
+
+	counts := make(map[string]int)
+	for _, w := range r.workers {
+		agentID := w.AgentID()
+		if agentID != "" {
+			counts[agentID]++
+		}
+	}
+	return counts
+}
+
 func (r *Router) GetAgents() []*AgentInfo {
 	r.agentsM.RLock()
 	defer r.agentsM.RUnlock()
@@ -144,4 +172,16 @@ func (r *Router) InFlightSnapshot() []monitoring.InFlight {
 
 func (r *Router) InFlightRecent(limit int) []monitoring.CompletedFlight {
 	return r.inflight.Recent(limit)
+}
+
+// InFlightForWorker returns the number of inflight requests for a specific worker address.
+func (r *Router) InFlightForWorker(workerAddr string) int {
+	all := r.inflight.GetAll()
+	count := 0
+	for _, f := range all {
+		if f.Worker == workerAddr {
+			count++
+		}
+	}
+	return count
 }

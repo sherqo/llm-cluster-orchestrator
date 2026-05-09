@@ -10,17 +10,68 @@ import (
 	pb "master/generated"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
 
+// ---------------------------------------------------------------------------
+// Worker lifecycle states (#6)
+// ---------------------------------------------------------------------------
+
+// WorkerStatus is kept for backward compatibility with snapshots.
 type WorkerStatus string
 
 const (
 	WorkerHealthy  WorkerStatus = "healthy"  // worker is healthy and can receive requests
 	WorkerDraining WorkerStatus = "draining" // worker is being drained and should not receive new requests, but can finish existing ones and then be removed
 )
+
+// LifecycleState represents the full lifecycle of a worker (#6).
+type LifecycleState int
+
+const (
+	StateStarting LifecycleState = iota // worker container created, gRPC not yet connected
+	StateWarming                        // gRPC connected, worker warming up (loading model, etc.)
+	StateHealthy                        // fully ready to serve requests
+	StateDraining                       // no new requests routed, waiting for active to finish
+	StateStopping                       // active requests done, closing connection
+	StateDead                           // fully terminated, ready for removal
+)
+
+func (ls LifecycleState) String() string {
+	switch ls {
+	case StateStarting:
+		return "STARTING"
+	case StateWarming:
+		return "WARMING"
+	case StateHealthy:
+		return "HEALTHY"
+	case StateDraining:
+		return "DRAINING"
+	case StateStopping:
+		return "STOPPING"
+	case StateDead:
+		return "DEAD"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// ToWorkerStatus converts LifecycleState to the legacy WorkerStatus for backward compat.
+func (ls LifecycleState) ToWorkerStatus() WorkerStatus {
+	switch ls {
+	case StateHealthy:
+		return WorkerHealthy
+	case StateDraining, StateStopping:
+		return WorkerDraining
+	default:
+		return WorkerDraining // non-routable states
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Worker struct
+// ---------------------------------------------------------------------------
 
 // worker struct represents a worker server
 type Worker struct {
@@ -29,7 +80,10 @@ type Worker struct {
 
 	activeRequests atomic.Int64
 
-	status WorkerStatus
+	lifecycle LifecycleState // new full lifecycle state (#6)
+	status    WorkerStatus   // kept for backward compat
+
+	agentID string // which agent spawned this worker (#10)
 
 	// gRPC client and connection
 	client pb.WorkerServiceClient
@@ -73,11 +127,12 @@ func NewWorker(id, addr string) (*Worker, error) {
 	}
 
 	return &Worker{
-		id:     id,
-		addr:   addr,
-		status: WorkerHealthy,
-		conn:   conn,
-		client: pb.NewWorkerServiceClient(conn),
+		id:        id,
+		addr:      addr,
+		status:    WorkerHealthy,
+		lifecycle: StateHealthy,
+		conn:      conn,
+		client:    pb.NewWorkerServiceClient(conn),
 	}, nil
 }
 
@@ -111,18 +166,36 @@ func (w *Worker) Ping() error {
 	return err
 }
 
+// isRoutable returns true only for workers that can accept new requests (#6).
 func (w *Worker) isRoutable() bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	return w.status == WorkerHealthy
+	return w.lifecycle == StateHealthy
 }
 
 func (w *Worker) IsHealthy() bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	return w.status == WorkerHealthy
+	return w.lifecycle == StateHealthy
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle state accessors (#6)
+// ---------------------------------------------------------------------------
+
+func (w *Worker) GetLifecycleState() LifecycleState {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.lifecycle
+}
+
+func (w *Worker) SetLifecycleState(state LifecycleState) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lifecycle = state
+	w.status = state.ToWorkerStatus()
 }
 
 func (w *Worker) GetStatus() WorkerStatus {
@@ -134,12 +207,14 @@ func (w *Worker) GetStatus() WorkerStatus {
 func (w *Worker) MarkHealthy() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.lifecycle = StateHealthy
 	w.status = WorkerHealthy
 }
 
 func (w *Worker) MarkDraining() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.lifecycle = StateDraining
 	w.status = WorkerDraining
 }
 
@@ -151,15 +226,18 @@ func (w *Worker) Snapshot() WorkerSnapshot {
 		ID:             w.id,
 		Addr:           w.addr,
 		Status:         w.status,
+		Lifecycle:      w.lifecycle,
 		Failures:       0,
 		Successes:      0,
 		ActiveRequests: w.activeRequests.Load(),
+		AgentID:        w.agentID,
 	}
 }
 
 func (w *Worker) SetDraining() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.lifecycle = StateDraining
 	w.status = WorkerDraining
 }
 
@@ -180,6 +258,22 @@ func (w *Worker) Addr() string {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.addr
+}
+
+// ---------------------------------------------------------------------------
+// Agent tracking (#10)
+// ---------------------------------------------------------------------------
+
+func (w *Worker) SetAgentID(agentID string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.agentID = agentID
+}
+
+func (w *Worker) AgentID() string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.agentID
 }
 
 // higher is higher and "pro" users get higher priority than "free" users. Adjust as needed.
