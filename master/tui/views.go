@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -18,42 +19,37 @@ func (m model) renderWorkers() string {
 	var b strings.Builder
 	w := m.usableWidth()
 
-	b.WriteString("\n")
-	b.WriteString(sectionHeader("Workers", fmt.Sprintf("%d total", len(m.snap.workers)), w))
-	b.WriteString("\n")
+	b.WriteString(sectionTitle("Workers", fmt.Sprintf("%d total", len(m.snap.workers)), w))
 
-	// Column header
-	b.WriteString(lipgloss.NewStyle().Foreground(clrMuted).Render(
-		fmt.Sprintf("  %-3s %-24s %-20s %-10s %7s  %-16s\n",
-			"", "ID", "Address", "State", "Active", "Agent"),
-	))
-	b.WriteString(dimLine(w))
+	// Column headers
+	hdr := fmt.Sprintf("  %-2s  %-24s  %-20s  %-10s  %7s  %s",
+		"", "ID", "Address", "State", "Active", "Agent")
+	b.WriteString(lipgloss.NewStyle().Foreground(clrMuted).Render(hdr) + "\n")
+	b.WriteString(rule(w))
 
 	for i, wk := range m.snap.workers {
-		sel := "   "
-		rowStyle := lipgloss.NewStyle().Foreground(clrText)
+		cursor := "  "
+		bg := lipgloss.NewStyle()
 		if i == m.selected {
-			sel = " ▶ "
-			rowStyle = rowStyle.Background(lipgloss.Color("#1c2431"))
+			cursor = "▶ "
+			bg = bg.Background(lipgloss.Color("#1c2431"))
 		}
 
 		stateStr, stateClr := lifecycleStyle(wk.Lifecycle.String())
-		state := lipgloss.NewStyle().Foreground(stateClr).Bold(true).Render(stateStr)
+		state := lipgloss.NewStyle().Foreground(stateClr).Bold(true).Width(10).Render(stateStr)
 		active := lipgloss.NewStyle().Foreground(clrYellow).Render(fmt.Sprintf("%7d", wk.ActiveRequests))
-		id := trim(wk.ID, 24)
-		addr := trim(wk.Addr, 20)
-		agent := trim(wk.AgentID, 16)
+		agent := trim(wk.AgentID, 20)
 		if agent == "" {
-			agent = lipgloss.NewStyle().Foreground(clrMuted).Render("(manual)")
+			agent = lipgloss.NewStyle().Foreground(clrMuted).Italic(true).Render("(manual)")
 		}
-		line := fmt.Sprintf("%s%-24s %-20s %-18s %s  %s", sel, id, addr, state, active, agent)
-		b.WriteString(rowStyle.Render(line) + "\n")
-	}
 
+		line := fmt.Sprintf("  %s%-24s  %-20s  %s  %s  %s",
+			cursor, trim(wk.ID, 24), trim(wk.Addr, 20), state, active, agent)
+		b.WriteString(bg.Render(line) + "\n")
+	}
 	if len(m.snap.workers) == 0 {
-		b.WriteString(emptyState("No workers registered"))
+		b.WriteString(empty("No workers registered"))
 	}
-
 	return b.String()
 }
 
@@ -63,29 +59,25 @@ func (m model) renderAgents() string {
 	var b strings.Builder
 	w := m.usableWidth()
 
-	b.WriteString("\n")
-	b.WriteString(sectionHeader("Registered Agents", fmt.Sprintf("%d total", len(m.snap.agents)), w))
-	b.WriteString("\n")
-
+	b.WriteString(sectionTitle("Agents", fmt.Sprintf("%d registered", len(m.snap.agents)), w))
 	b.WriteString(lipgloss.NewStyle().Foreground(clrMuted).Render(
-		fmt.Sprintf("  %-30s %-24s %8s  %s\n", "Agent ID", "Address", "Workers", "Uptime"),
+		fmt.Sprintf("  %-30s  %-24s  %8s  %s\n", "Agent ID", "Address", "Workers", "Uptime"),
 	))
-	b.WriteString(dimLine(w))
+	b.WriteString(rule(w))
 
 	for _, a := range m.snap.agents {
 		addr := fmt.Sprintf("%s:%d", a.Host, a.Port)
 		uptime := time.Since(a.AddedAt).Round(time.Second)
-		line := fmt.Sprintf("  %-30s %-24s %8d  %s",
+		line := fmt.Sprintf("  %-30s  %-24s  %8d  %s",
 			trim(a.AgentID, 30), trim(addr, 24), a.WorkerCount, uptime)
 		b.WriteString(line + "\n")
 	}
 	if len(m.snap.agents) == 0 {
-		b.WriteString(emptyState("No agents registered"))
+		b.WriteString(empty("No agents registered"))
 	}
 
 	b.WriteString("\n")
-	b.WriteString(sectionHeader("Workers by Agent", "", w))
-	b.WriteString("\n")
+	b.WriteString(sectionTitle("Workers by Agent", "", w))
 
 	agentWorkers := make(map[string][]lib.WorkerSnapshot)
 	for _, wk := range m.snap.workers {
@@ -96,50 +88,47 @@ func (m model) renderAgents() string {
 		agentWorkers[aid] = append(agentWorkers[aid], wk)
 	}
 
-	for _, a := range m.snap.agents {
-		workers := agentWorkers[a.AgentID]
-		agentLabel := lipgloss.NewStyle().Foreground(clrCyan).Bold(true).Render(trim(a.AgentID, 40))
-		b.WriteString(fmt.Sprintf("  %s  —  %d worker(s)\n", agentLabel, len(workers)))
+	renderGroup := func(label string, workers []lib.WorkerSnapshot) {
+		b.WriteString(fmt.Sprintf("  %s  —  %d worker(s)\n",
+			lipgloss.NewStyle().Foreground(clrCyan).Bold(true).Render(label),
+			len(workers)))
 		for j, wk := range workers {
-			connector := "├─"
+			con := "├─"
 			if j == len(workers)-1 {
-				connector = "└─"
+				con = "└─"
 			}
 			stateStr, stateClr := lifecycleStyle(wk.Lifecycle.String())
 			state := lipgloss.NewStyle().Foreground(stateClr).Render(stateStr)
-			b.WriteString(fmt.Sprintf("    %s %-26s %-10s active=%d\n",
-				connector, trim(wk.Addr, 26), state, wk.ActiveRequests))
+			b.WriteString(fmt.Sprintf("    %s %-26s  %-12s  active=%d\n",
+				con, trim(wk.Addr, 26), state, wk.ActiveRequests))
 		}
 	}
+
+	for _, a := range m.snap.agents {
+		renderGroup(trim(a.AgentID, 40), agentWorkers[a.AgentID])
+	}
 	if manual, ok := agentWorkers["(manual)"]; ok {
-		b.WriteString(fmt.Sprintf("  %s  —  %d worker(s)\n",
-			lipgloss.NewStyle().Foreground(clrMuted).Render("(manual)"), len(manual)))
-		for _, wk := range manual {
-			stateStr, stateClr := lifecycleStyle(wk.Lifecycle.String())
-			state := lipgloss.NewStyle().Foreground(stateClr).Render(stateStr)
-			b.WriteString(fmt.Sprintf("    └─ %-26s %-10s active=%d\n",
-				trim(wk.Addr, 26), state, wk.ActiveRequests))
-		}
+		renderGroup("(manual)", manual)
+	}
+	if len(m.snap.workers) == 0 && len(m.snap.agents) == 0 {
+		b.WriteString(empty("No workers or agents"))
 	}
 
 	return b.String()
 }
 
-// ── Inflight tab ──────────────────────────────────────────────────────────────
+// ── InFlight tab ──────────────────────────────────────────────────────────────
 
 func (m model) renderInflight() string {
 	var b strings.Builder
 	w := m.usableWidth()
 	now := time.Now()
 
-	b.WriteString("\n")
-	b.WriteString(sectionHeader("In-Flight Requests", fmt.Sprintf("%d active", len(m.snap.inflight)), w))
-	b.WriteString("\n")
-
+	b.WriteString(sectionTitle("In-Flight Requests", fmt.Sprintf("%d active", len(m.snap.inflight)), w))
 	b.WriteString(lipgloss.NewStyle().Foreground(clrMuted).Render(
-		fmt.Sprintf("  %-36s %-22s %10s\n", "Request ID", "Worker", "Elapsed"),
+		fmt.Sprintf("  %-36s  %-22s  %10s\n", "Request ID", "Worker", "Elapsed"),
 	))
-	b.WriteString(dimLine(w))
+	b.WriteString(rule(w))
 
 	for _, req := range m.snap.inflight {
 		elapsed := now.Sub(req.StartedAt).Round(time.Millisecond)
@@ -152,61 +141,103 @@ func (m model) renderInflight() string {
 		default:
 			elClr = clrGreen
 		}
-		elStr := lipgloss.NewStyle().Foreground(elClr).Render(fmt.Sprintf("%10s", elapsed))
-		b.WriteString(fmt.Sprintf("  %-36s %-22s %s\n",
-			trim(req.RequestID, 36), trim(req.Worker, 22), elStr))
+		el := lipgloss.NewStyle().Foreground(elClr).Render(fmt.Sprintf("%10s", elapsed))
+		b.WriteString(fmt.Sprintf("  %-36s  %-22s  %s\n",
+			trim(req.RequestID, 36), trim(req.Worker, 22), el))
 	}
 	if len(m.snap.inflight) == 0 {
-		b.WriteString(emptyState("No requests in flight"))
+		b.WriteString(empty("No requests in flight"))
 	}
 
 	b.WriteString("\n")
-	b.WriteString(sectionHeader("Recent Completed", fmt.Sprintf("%d shown", min(25, len(m.snap.recent))), w))
-	b.WriteString("\n")
+	b.WriteString(sectionTitle("Recent Completed", fmt.Sprintf("last %d", min(25, len(m.snap.recent))), w))
 	b.WriteString(lipgloss.NewStyle().Foreground(clrMuted).Render(
-		fmt.Sprintf("  %-36s %-22s %10s\n", "Request ID", "Worker", "Duration"),
+		fmt.Sprintf("  %-36s  %-22s  %10s\n", "Request ID", "Worker", "Duration"),
 	))
-	b.WriteString(dimLine(w))
+	b.WriteString(rule(w))
 
 	start := 0
 	if len(m.snap.recent) > 25 {
 		start = len(m.snap.recent) - 25
 	}
 	for _, req := range m.snap.recent[start:] {
-		b.WriteString(fmt.Sprintf("  %-36s %-22s %10s\n",
+		b.WriteString(fmt.Sprintf("  %-36s  %-22s  %10s\n",
 			trim(req.RequestID, 36), trim(req.Worker, 22), req.Duration.Round(time.Millisecond)))
 	}
 	if len(m.snap.recent) == 0 {
-		b.WriteString(emptyState("No completed requests yet"))
+		b.WriteString(empty("No completed requests yet"))
 	}
 	return b.String()
 }
 
 // ── Logs tab ──────────────────────────────────────────────────────────────────
+// Lines are word-wrapped to terminal width so nothing is cut off.
 
 func (m model) renderLogs() string {
 	var b strings.Builder
 	w := m.usableWidth()
 
-	b.WriteString("\n")
-	b.WriteString(sectionHeader("System Logs", fmt.Sprintf("%d entries", len(m.snap.logs)), w))
-	b.WriteString("\n")
+	b.WriteString(sectionTitle("System Logs", fmt.Sprintf("%d entries (scroll ↑↓)", len(m.snap.logs)), w))
 
-	// Show last 200 entries; viewport gives real scrolling
+	// Reserve space for timestamp + place prefix
+	const prefix = "  00:00:00  placeholder     "
+	prefixW := utf8.RuneCountInString(prefix)
+	wrapW := w - prefixW
+	if wrapW < 20 {
+		wrapW = 20
+	}
+
+	// Show all logs; viewport provides the scrolling
 	start := 0
-	if len(m.snap.logs) > 200 {
-		start = len(m.snap.logs) - 200
+	if len(m.snap.logs) > 500 {
+		start = len(m.snap.logs) - 500
 	}
 	for _, l := range m.snap.logs[start:] {
 		ts := lipgloss.NewStyle().Foreground(clrMuted).Render(l.Time.Format("15:04:05"))
-		place := lipgloss.NewStyle().Foreground(clrCyan).Render(fmt.Sprintf("%-12s", trim(l.Place, 12)))
-		msg := l.Msg
-		b.WriteString(fmt.Sprintf("  %s  %s  %s\n", ts, place, msg))
+		place := lipgloss.NewStyle().Foreground(clrCyan).
+			Width(14).Render(trim(l.Place, 14))
+
+		// Word-wrap the message
+		words := strings.Fields(l.Msg)
+		lines := wordWrap(words, wrapW)
+		for i, line := range lines {
+			if i == 0 {
+				b.WriteString(fmt.Sprintf("  %s  %s  %s\n", ts, place, line))
+			} else {
+				b.WriteString(fmt.Sprintf("  %s  %s  %s\n",
+					strings.Repeat(" ", 8),
+					strings.Repeat(" ", 14),
+					line))
+			}
+		}
 	}
 	if len(m.snap.logs) == 0 {
-		b.WriteString(emptyState("No logs yet"))
+		b.WriteString(empty("No logs yet"))
 	}
 	return b.String()
+}
+
+// wordWrap splits words into lines of at most maxW characters.
+func wordWrap(words []string, maxW int) []string {
+	if len(words) == 0 {
+		return []string{""}
+	}
+	var lines []string
+	current := ""
+	for _, word := range words {
+		if current == "" {
+			current = word
+		} else if utf8.RuneCountInString(current)+1+utf8.RuneCountInString(word) <= maxW {
+			current += " " + word
+		} else {
+			lines = append(lines, current)
+			current = word
+		}
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	return lines
 }
 
 // ── Stats tab ─────────────────────────────────────────────────────────────────
@@ -232,109 +263,101 @@ func (m model) renderStats() string {
 		}
 	}
 
-	b.WriteString("\n")
-	b.WriteString(sectionHeader("Cluster Overview", "", w))
-	b.WriteString("\n")
+	// ── Cluster box ──────────────────────────────────────────────────────────
+	b.WriteString(sectionTitle("Cluster Overview", "", w))
 
-	// Two-column layout
-	leftCol := []string{
-		statRow("Total Workers", strconv.Itoa(len(m.snap.workers))),
-		statRow("  ├ Healthy", greenVal(strconv.Itoa(healthyCount))),
-		statRow("  ├ Starting", yellowVal(strconv.Itoa(startingCount))),
-		statRow("  └ Draining", redVal(strconv.Itoa(drainingCount))),
-		statRow("Agents", strconv.Itoa(len(m.snap.agents))),
-		statRow("In-Flight", strconv.Itoa(len(m.snap.inflight))),
-		statRow("Strategy", string(m.snap.strategy)),
-		statRow("Uptime", m.snap.uptime.Round(time.Second).String()),
+	col := (w - 4) / 2
+	left := []string{
+		kv("Total Workers", strconv.Itoa(len(m.snap.workers)), clrText),
+		kv("  ├ Healthy", strconv.Itoa(healthyCount), clrGreen),
+		kv("  ├ Starting/Warming", strconv.Itoa(startingCount), clrYellow),
+		kv("  └ Draining", strconv.Itoa(drainingCount), clrOrange),
+		"",
+		kv("Agents", strconv.Itoa(len(m.snap.agents)), clrText),
+		kv("In-Flight", strconv.Itoa(len(m.snap.inflight)), clrText),
+		kv("Active Requests", strconv.FormatInt(totalActive, 10), clrYellow),
+		kv("Strategy", string(m.snap.strategy), clrPurple),
+		kv("Uptime", m.snap.uptime.Round(time.Second).String(), clrMuted),
 	}
-	rightCol := []string{
-		statRow("Successes", greenVal(strconv.FormatInt(totalSuccess, 10))),
-		statRow("Failures", redVal(strconv.FormatInt(totalFails, 10))),
-		statRow("Active Reqs", yellowVal(strconv.FormatInt(totalActive, 10))),
+	right := []string{
+		kv("Successes", strconv.FormatInt(totalSuccess, 10), clrGreen),
+		kv("Failures", strconv.FormatInt(totalFails, 10), clrRed),
 	}
 
 	if len(m.snap.recent) > 0 {
 		var sum float64
-		durations := make([]float64, 0, len(m.snap.recent))
+		durs := make([]float64, 0, len(m.snap.recent))
 		for _, r := range m.snap.recent {
 			d := r.Duration.Seconds()
 			sum += d
-			durations = append(durations, d)
+			durs = append(durs, d)
 		}
-		avg := sum / float64(len(durations))
-		sort.Float64s(durations)
-		p95Idx := int(float64(len(durations)) * 0.95)
-		if p95Idx >= len(durations) {
-			p95Idx = len(durations) - 1
-		}
-		rightCol = append(rightCol,
-			statRow("Avg Latency", fmt.Sprintf("%.3fs", avg)),
-			statRow("P95 Latency", fmt.Sprintf("%.3fs", durations[p95Idx])),
-			statRow("Samples", strconv.Itoa(len(durations))),
+		sort.Float64s(durs)
+		avg := sum / float64(len(durs))
+		p95 := durs[min(int(float64(len(durs))*0.95), len(durs)-1)]
+		right = append(right, "",
+			kv("Avg Latency", fmt.Sprintf("%.3fs", avg), clrText),
+			kv("P95 Latency", fmt.Sprintf("%.3fs", p95), clrText),
+			kv("Samples", strconv.Itoa(len(durs)), clrMuted),
 		)
 	}
 
-	colW := (w - 4) / 2
-	maxRows := max(len(leftCol), len(rightCol))
-	for i := 0; i < maxRows; i++ {
-		l := ""
-		r := ""
-		if i < len(leftCol) {
-			l = leftCol[i]
+	maxR := max(len(left), len(right))
+	for i := 0; i < maxR; i++ {
+		lStr, rStr := "", ""
+		if i < len(left) {
+			lStr = left[i]
 		}
-		if i < len(rightCol) {
-			r = rightCol[i]
+		if i < len(right) {
+			rStr = right[i]
 		}
-		lPad := lipgloss.NewStyle().Width(colW).Render(l)
-		b.WriteString("  " + lPad + "  " + r + "\n")
+		lPad := lipgloss.NewStyle().Width(col).Render(lStr)
+		b.WriteString("  " + lPad + "  " + rStr + "\n")
 	}
 
+	// ── Agents ───────────────────────────────────────────────────────────────
 	b.WriteString("\n")
-	b.WriteString(sectionHeader("Agents", "", w))
-	b.WriteString("\n")
+	b.WriteString(sectionTitle("Agents", "", w))
 	for _, a := range m.snap.agents {
 		addr := a.Host + ":" + strconv.Itoa(a.Port)
-		b.WriteString(fmt.Sprintf("  %-32s  %-22s  workers=%d\n",
-			trim(a.AgentID, 32), trim(addr, 22), a.WorkerCount))
+		b.WriteString(fmt.Sprintf("  %-32s  %-24s  workers=%d\n",
+			trim(a.AgentID, 32), trim(addr, 24), a.WorkerCount))
 	}
 	if len(m.snap.agents) == 0 {
-		b.WriteString(emptyState("No agents"))
+		b.WriteString(empty("No agents"))
 	}
 
 	return b.String()
 }
 
-// ── Shared helpers ────────────────────────────────────────────────────────────
+// ── Shared section helpers ────────────────────────────────────────────────────
 
-func sectionHeader(title, meta string, width int) string {
-	t := lipgloss.NewStyle().Bold(true).Foreground(clrAccent).Render("  " + title)
+// sectionTitle renders a labelled rule: "  Title   meta\n────────\n"
+func sectionTitle(title, meta string, width int) string {
+	t := lipgloss.NewStyle().Bold(true).Foreground(clrAccent).Render(title)
 	m := ""
 	if meta != "" {
 		m = "  " + lipgloss.NewStyle().Foreground(clrMuted).Render(meta)
 	}
-	return t + m + "\n" + dimLine(width)
+	return "\n  " + t + m + "\n" + rule(width)
 }
 
-func dimLine(width int) string {
+func rule(width int) string {
 	if width <= 0 {
 		width = 80
 	}
 	return lipgloss.NewStyle().Foreground(clrBorder).Render(strings.Repeat("─", width)) + "\n"
 }
 
-func emptyState(msg string) string {
-	return lipgloss.NewStyle().Foreground(clrMuted).Italic(true).Render("  "+msg) + "\n"
+func empty(msg string) string {
+	return "  " + lipgloss.NewStyle().Foreground(clrMuted).Italic(true).Render(msg) + "\n"
 }
 
-func statRow(label, val string) string {
-	l := lipgloss.NewStyle().Foreground(clrMuted).Render(label)
-	v := lipgloss.NewStyle().Foreground(clrText).Bold(true).Render(val)
-	return fmt.Sprintf("%-22s  %s", l, v)
+func kv(label, val string, clr lipgloss.Color) string {
+	l := lipgloss.NewStyle().Foreground(clrMuted).Render(fmt.Sprintf("%-24s", label))
+	v := lipgloss.NewStyle().Foreground(clr).Bold(true).Render(val)
+	return l + v
 }
-
-func greenVal(s string) string  { return lipgloss.NewStyle().Foreground(clrGreen).Render(s) }
-func yellowVal(s string) string { return lipgloss.NewStyle().Foreground(clrYellow).Render(s) }
-func redVal(s string) string    { return lipgloss.NewStyle().Foreground(clrRed).Render(s) }
 
 func lifecycleStyle(state string) (string, lipgloss.Color) {
 	switch state {
@@ -346,7 +369,9 @@ func lifecycleStyle(state string) (string, lipgloss.Color) {
 		return "◑ warming", clrCyan
 	case "draining":
 		return "◐ draining", clrOrange
-	default:
+	case "stopping", "dead":
 		return "✗ " + state, clrRed
+	default:
+		return state, clrMuted
 	}
 }

@@ -26,7 +26,7 @@ const (
 	tabAutoscaling
 )
 
-var tabLabels = []string{"  Workers ", "  Agents ", "  In-Flight ", "  Logs ", "  Stats ", "  AutoScale "}
+var tabLabels = []string{"Workers", "Agents", "In-Flight", "Logs", "Stats", "AutoScale"}
 
 // ── History ──────────────────────────────────────────────────────────────────
 
@@ -70,9 +70,9 @@ type model struct {
 	height     int
 	tickEvery  time.Duration
 
-	// scroll
-	vp        viewport.Model
-	vpReady   bool
+	// scroll viewport
+	vp      viewport.Model
+	vpReady bool
 
 	// autoscaling history & zoom
 	hist      []histPoint
@@ -83,7 +83,6 @@ type model struct {
 
 type tickMsg time.Time
 type refreshMsg snapshot
-type errMsg error
 
 // ── Constructor ──────────────────────────────────────────────────────────────
 
@@ -108,21 +107,18 @@ func (m model) Init() tea.Cmd {
 }
 
 // ── Update ───────────────────────────────────────────────────────────────────
+//
+// Design rule: every case MUST return explicitly. The fallthrough-to-viewport
+// pattern was causing double updates and phantom content.
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-
 	switch msg := msg.(type) {
 
+	// ── Window resize ─────────────────────────────────────────────────────
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		headerH := 3 // header + tabs + divider
-		footerH := 1
-		vpH := m.height - headerH - footerH
-		if vpH < 5 {
-			vpH = 5
-		}
+		vpH := m.vpHeight()
 		if !m.vpReady {
 			m.vp = viewport.New(m.width, vpH)
 			m.vpReady = true
@@ -133,158 +129,200 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vp.SetContent(m.renderBody())
 		return m, nil
 
+	// ── Tick → fetch ──────────────────────────────────────────────────────
 	case tickMsg:
 		return m, tea.Batch(
 			m.fetchSnapshotCmd(),
 			tea.Tick(m.tickEvery, func(t time.Time) tea.Msg { return tickMsg(t) }),
 		)
 
+	// ── Data refresh ──────────────────────────────────────────────────────
 	case refreshMsg:
 		m.snap = snapshot(msg)
 		if m.selected >= len(m.snap.workers) {
 			m.selected = max(0, len(m.snap.workers)-1)
 		}
-		pt := histPoint{
+		// Always append history point
+		m.hist = append(m.hist, histPoint{
 			queueDepth:  m.snap.autoscaling.Metrics.QueueDepth,
 			utilization: m.snap.autoscaling.Metrics.WorkerUtilization,
 			latency:     m.snap.autoscaling.Metrics.P95Latency,
 			rps:         m.snap.autoscaling.Metrics.RequestsPerSec,
 			time:        time.Now(),
-		}
-		m.hist = append(m.hist, pt)
+		})
 		if len(m.hist) > maxHistory {
 			m.hist = m.hist[len(m.hist)-maxHistory:]
 		}
-		if m.zoomStart > 0 && m.zoomStart >= len(m.hist) {
-			m.zoomStart = len(m.hist) - 1
+		if m.zoomStart >= 0 && m.zoomStart >= len(m.hist) {
+			m.zoomStart = max(0, len(m.hist)-1)
 		}
 		if m.vpReady {
+			// Preserve scroll position so live updates don't jump the user around
+			prevY := m.vp.YOffset
 			m.vp.SetContent(m.renderBody())
+			m.vp.SetYOffset(prevY)
 		}
 		return m, nil
 
-	case errMsg:
-		m.lastError = msg.Error()
-		return m, nil
-
+	// ── Keyboard ──────────────────────────────────────────────────────────
 	case tea.KeyMsg:
 		if m.inputMode != "" {
 			return m.handleInputMode(msg)
 		}
+		return m.handleKey(msg)
 
-		s := msg.String()
-		switch s {
-		case "ctrl+c", "q":
-			return m, tea.Quit
-		case "1":
-			m.activeTab = tabWorkers
-			m.refreshVP()
-		case "2":
-			m.activeTab = tabAgents
-			m.refreshVP()
-		case "3":
-			m.activeTab = tabInflight
-			m.refreshVP()
-		case "4":
-			m.activeTab = tabLogs
-			m.refreshVP()
-		case "5":
-			m.activeTab = tabStats
-			m.refreshVP()
-		case "6":
-			m.activeTab = tabAutoscaling
-			m.refreshVP()
-		case "up", "k":
-			if m.activeTab == tabWorkers && m.selected > 0 {
-				m.selected--
-				m.refreshVP()
-			} else {
-				var vpCmd tea.Cmd
-				m.vp, vpCmd = m.vp.Update(msg)
-				cmds = append(cmds, vpCmd)
-			}
-		case "down", "j":
-			if m.activeTab == tabWorkers && m.selected < len(m.snap.workers)-1 {
-				m.selected++
-				m.refreshVP()
-			} else {
-				var vpCmd tea.Cmd
-				m.vp, vpCmd = m.vp.Update(msg)
-				cmds = append(cmds, vpCmd)
-			}
-		case "pgup", "ctrl+u":
-			var vpCmd tea.Cmd
-			m.vp, vpCmd = m.vp.Update(msg)
-			cmds = append(cmds, vpCmd)
-		case "pgdn", "ctrl+d":
-			var vpCmd tea.Cmd
-			m.vp, vpCmd = m.vp.Update(msg)
-			cmds = append(cmds, vpCmd)
-		case "z":
-			if m.activeTab == tabAutoscaling {
-				if m.zoomStart < 0 {
-					m.zoomStart = max(0, len(m.hist)-60)
-					m.status = "zoom: 60s window"
-				} else {
-					m.zoomStart = -1
-					m.status = "zoom: off"
-				}
-				m.refreshVP()
-			}
-		case "h", "left":
-			if m.activeTab == tabAutoscaling && m.zoomStart > 0 {
-				m.zoomStart = max(0, m.zoomStart-10)
-				m.refreshVP()
-			}
-		case "l", "right":
-			if m.activeTab == tabAutoscaling && m.zoomStart >= 0 {
-				m.zoomStart = min(m.zoomStart+10, max(0, len(m.hist)-1))
-				m.refreshVP()
-			}
-		case "r":
-			m.status = "refreshing…"
-			return m, m.fetchSnapshotCmd()
-		case "a":
-			m.inputMode = "add"
-			m.inputValue = ""
-			m.status = "enter worker address (host:port), then Enter"
-		case "d":
-			if len(m.snap.workers) > 0 {
-				w := m.snap.workers[m.selected]
-				if err := m.router.DrainWorker(w.ID); err != nil {
-					m.lastError = err.Error()
-				} else {
-					m.status = "draining " + w.ID
-				}
-				return m, m.fetchSnapshotCmd()
-			}
-		case "x":
-			if len(m.snap.workers) > 0 {
-				w := m.snap.workers[m.selected]
-				if err := m.router.RemoveWorker(w.ID); err != nil {
-					m.lastError = err.Error()
-				} else {
-					m.status = "removed " + w.ID
-				}
-				return m, m.fetchSnapshotCmd()
-			}
-		case "s":
-			m.cycleStrategy()
-			return m, m.fetchSnapshotCmd()
+	// ── Mouse wheel (pass to viewport) ────────────────────────────────────
+	case tea.MouseMsg:
+		if m.vpReady {
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(msg)
+			return m, cmd
 		}
+		return m, nil
 	}
 
-	// propagate mouse/wheel to viewport
-	if m.vpReady {
-		var vpCmd tea.Cmd
-		m.vp, vpCmd = m.vp.Update(msg)
-		cmds = append(cmds, vpCmd)
-	}
-
-	return m, tea.Batch(cmds...)
+	return m, nil
 }
 
-func (m *model) refreshVP() {
+func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+
+	switch s {
+	case "ctrl+c", "q":
+		return m, tea.Quit
+
+	// Tab switching — reset scroll to top on each switch
+	case "1":
+		return m.switchTab(tabWorkers)
+	case "2":
+		return m.switchTab(tabAgents)
+	case "3":
+		return m.switchTab(tabInflight)
+	case "4":
+		return m.switchTab(tabLogs)
+	case "5":
+		return m.switchTab(tabStats)
+	case "6":
+		return m.switchTab(tabAutoscaling)
+
+	// Worker row selection (only on workers tab)
+	case "up", "k":
+		if m.activeTab == tabWorkers {
+			if m.selected > 0 {
+				m.selected--
+				m.setVPContent()
+			}
+			return m, nil
+		}
+		// Otherwise scroll viewport
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		return m, cmd
+
+	case "down", "j":
+		if m.activeTab == tabWorkers {
+			if m.selected < len(m.snap.workers)-1 {
+				m.selected++
+				m.setVPContent()
+			}
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		return m, cmd
+
+	// Scroll keys — forward directly to viewport
+	case "pgup", "ctrl+u", "b":
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		return m, cmd
+
+	case "pgdn", "ctrl+d", "f":
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		return m, cmd
+
+	// Autoscaling zoom
+	case "z":
+		if m.activeTab == tabAutoscaling {
+			if m.zoomStart < 0 {
+				m.zoomStart = max(0, len(m.hist)-60)
+				m.status = "zoom: 60s window"
+			} else {
+				m.zoomStart = -1
+				m.status = "zoom: all"
+			}
+			m.setVPContent()
+		}
+		return m, nil
+
+	case "left", "h":
+		if m.activeTab == tabAutoscaling && m.zoomStart > 0 {
+			m.zoomStart = max(0, m.zoomStart-10)
+			m.setVPContent()
+		}
+		return m, nil
+
+	case "right", "l":
+		if m.activeTab == tabAutoscaling && m.zoomStart >= 0 {
+			m.zoomStart = min(m.zoomStart+10, max(0, len(m.hist)-1))
+			m.setVPContent()
+		}
+		return m, nil
+
+	// Actions
+	case "r":
+		m.status = "refreshing…"
+		return m, m.fetchSnapshotCmd()
+
+	case "a":
+		m.inputMode = "add"
+		m.inputValue = ""
+		m.status = "enter worker address (host:port), then Enter"
+		return m, nil
+
+	case "d":
+		if len(m.snap.workers) > 0 {
+			w := m.snap.workers[m.selected]
+			if err := m.router.DrainWorker(w.ID); err != nil {
+				m.lastError = err.Error()
+			} else {
+				m.status = "draining " + w.ID
+			}
+			return m, m.fetchSnapshotCmd()
+		}
+		return m, nil
+
+	case "x":
+		if len(m.snap.workers) > 0 {
+			w := m.snap.workers[m.selected]
+			if err := m.router.RemoveWorker(w.ID); err != nil {
+				m.lastError = err.Error()
+			} else {
+				m.status = "removed " + w.ID
+			}
+			return m, m.fetchSnapshotCmd()
+		}
+		return m, nil
+
+	case "s":
+		m.cycleStrategy()
+		return m, m.fetchSnapshotCmd()
+	}
+
+	return m, nil
+}
+
+// switchTab changes the active tab and resets the viewport scroll to top.
+func (m model) switchTab(t tab) (tea.Model, tea.Cmd) {
+	m.activeTab = t
+	m.setVPContent()
+	m.vp.GotoTop()
+	return m, nil
+}
+
+// setVPContent re-renders the body into the viewport.
+func (m *model) setVPContent() {
 	if m.vpReady {
 		m.vp.SetContent(m.renderBody())
 	}
@@ -296,10 +334,20 @@ func (m model) View() string {
 	if !m.vpReady {
 		return "initializing…\n"
 	}
-	header := m.renderHeader()
-	tabs := m.renderTabs()
-	footer := m.renderFooter()
-	return lipgloss.JoinVertical(lipgloss.Left, header, tabs, m.vp.View(), footer)
+	content := lipgloss.JoinVertical(
+		lipgloss.Left,
+		m.renderHeader(),
+		m.renderTabs(),
+		m.vp.View(),
+		m.renderFooter(),
+	)
+	
+	// CRITICAL: MaxHeight and MaxWidth prevent BubbleTea from printing lines that wrap
+	// or pushing the terminal history down, which causes the "UI goes out and comes in" flickering.
+	return lipgloss.NewStyle().
+		MaxWidth(m.width).
+		MaxHeight(m.height).
+		Render(content)
 }
 
 // ── Input mode ───────────────────────────────────────────────────────────────
@@ -322,6 +370,7 @@ func (m model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.lastError = err.Error()
 			} else {
 				m.status = "added " + addr
+				m.lastError = ""
 			}
 		}
 		m.inputMode = ""
@@ -346,7 +395,7 @@ func (m model) fetchSnapshotCmd() tea.Cmd {
 		workers := m.router.WorkersSnapshot()
 		agents := m.router.AgentsSnapshot()
 		inflight := m.router.InFlightSnapshot()
-		logs := monitoring.LogSnapshot(250)
+		logs := monitoring.LogSnapshot(500)
 		recent := m.router.InFlightRecent(300)
 		strategy := m.router.Strategy()
 		autoscaling := m.router.AutoscalerSnapshot()
@@ -373,7 +422,7 @@ func (m model) fetchSnapshotCmd() tea.Cmd {
 	}
 }
 
-// ── Misc ─────────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 func (m *model) cycleStrategy() {
 	switch m.router.Strategy() {
@@ -403,6 +452,16 @@ func (m model) renderBody() string {
 	default:
 		return m.renderWorkers()
 	}
+}
+
+// vpHeight computes the viewport height from terminal dimensions.
+// Header=1, tabs=1, divider=1, footer=1 = 4 rows of chrome.
+func (m model) vpHeight() int {
+	h := m.height - 4
+	if h < 5 {
+		h = 5
+	}
+	return h
 }
 
 // Run starts the TUI program.

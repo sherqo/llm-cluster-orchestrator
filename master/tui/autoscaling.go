@@ -41,11 +41,8 @@ func (m model) renderAutoscaling() string {
 	var b strings.Builder
 
 	// ── 1. Status Bar ────────────────────────────────────────────────────────
-	b.WriteString("\n")
-	b.WriteString(sectionHeader("AutoScale  —  Live Status", "", w))
-	b.WriteString("\n")
+	b.WriteString(sectionTitle("AutoScale — Live Status", "", w))
 	b.WriteString(m.renderStatusBar(a, mets, w))
-	b.WriteString("\n")
 
 	// ── 2. Graphs ─────────────────────────────────────────────────────────────
 	window := m.hist
@@ -55,51 +52,40 @@ func (m model) renderAutoscaling() string {
 
 	zoomLabel := ""
 	if m.zoomStart >= 0 {
-		zoomLabel = fmt.Sprintf(" [zoom: last %ds]", len(window))
+		zoomLabel = fmt.Sprintf(" · zoom: %d pts", len(window))
 	}
-	b.WriteString(sectionHeader("Graphs"+zoomLabel, "[z] toggle zoom  [←→] scroll", w))
-	b.WriteString("\n")
+	b.WriteString(sectionTitle("Graphs"+zoomLabel, "[z] zoom  [←→] shift", w))
 
 	if len(window) < 2 {
-		b.WriteString(emptyState("Collecting data… (need ≥2 ticks)"))
+		b.WriteString(empty(fmt.Sprintf("Collecting history… (%d/2 ticks)", len(m.hist))))
 	} else {
 		b.WriteString(m.renderUtilizationGraph(window, gw, cfg))
 		b.WriteString(m.renderQueueRPSGraph(window, gw))
 		b.WriteString(m.renderLatencyGraph(window, gw))
 	}
-	b.WriteString("\n")
 
 	// ── 3. Decision Engine ────────────────────────────────────────────────────
-	b.WriteString(sectionHeader("Decision Engine", "", w))
-	b.WriteString("\n")
+	b.WriteString(sectionTitle("Decision Engine", "", w))
 	b.WriteString(m.renderDecisionPanel(a, mets, cfg, gw))
-	b.WriteString("\n")
 
 	// ── 4. Startup Stats ──────────────────────────────────────────────────────
-	b.WriteString(sectionHeader("Worker Startup Times", "", w))
-	b.WriteString("\n")
+	b.WriteString(sectionTitle("Worker Startup Times", "", w))
 	b.WriteString(m.renderStartupStats(stats))
-	b.WriteString("\n")
 
 	// ── 5. Recent Actions ─────────────────────────────────────────────────────
 	if len(a.RecentActions) > 0 {
-		b.WriteString(sectionHeader("Recent Scaling Actions", fmt.Sprintf("%d total", len(a.RecentActions)), w))
-		b.WriteString("\n")
+		b.WriteString(sectionTitle("Recent Scaling Actions", fmt.Sprintf("%d total", len(a.RecentActions)), w))
 		b.WriteString(m.renderRecentActions(a, gw))
-		b.WriteString("\n")
 	}
 
 	// ── 6. Agent Health ───────────────────────────────────────────────────────
 	if len(a.AgentHealth) > 0 {
-		b.WriteString(sectionHeader("Agent Health", "", w))
-		b.WriteString("\n")
+		b.WriteString(sectionTitle("Agent Health", "", w))
 		b.WriteString(m.renderAgentHealth(a))
-		b.WriteString("\n")
 	}
 
 	// ── 7. Config ─────────────────────────────────────────────────────────────
-	b.WriteString(sectionHeader("Configuration", "", w))
-	b.WriteString("\n")
+	b.WriteString(sectionTitle("Configuration", "", w))
 	b.WriteString(m.renderConfig(cfg))
 
 	return b.String()
@@ -245,7 +231,7 @@ func decisionRow(label, bar, val string) string {
 
 func (m model) renderStartupStats(stats lib.StartupStats) string {
 	if stats.TotalStartups == 0 {
-		return emptyState("No startup data yet")
+		return empty("No startup data yet")
 	}
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("  %s  %s   %s  %s   %s  %s/%s\n",
