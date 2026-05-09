@@ -49,6 +49,15 @@ type Router struct {
 	strategyM sync.RWMutex
 
 	rrCounter atomic.Uint64
+
+	// Autoscaler and metrics (set by Serve, read by TUI)
+	metrics    *MetricsCollector
+	autoscaler *Autoscaler
+
+	// Worker startup time tracking
+	startupMu      sync.Mutex
+	startupDurations []time.Duration
+	startupFailures  int
 }
 
 // router methods
@@ -150,6 +159,88 @@ func (r *Router) AgentsSnapshot() []AgentSnapshot {
 		})
 	}
 	return out
+}
+
+// SetMetrics sets the metrics collector reference for TUI access.
+func (r *Router) SetMetrics(mc *MetricsCollector) { r.metrics = mc }
+
+// SetAutoscaler sets the autoscaler reference for TUI access.
+func (r *Router) SetAutoscaler(as *Autoscaler) { r.autoscaler = as }
+
+// AutoscalerSnapshot returns the current autoscaler state for the TUI.
+func (r *Router) AutoscalerSnapshot() AutoscalerSnapshot {
+	if r.autoscaler == nil {
+		return AutoscalerSnapshot{}
+	}
+	return r.autoscaler.Snapshot()
+}
+
+// MetricsSnapshot returns the current cluster metrics.
+func (r *Router) MetricsSnapshot() ClusterMetrics {
+	if r.metrics == nil {
+		return ClusterMetrics{}
+	}
+	return r.metrics.Snapshot()
+}
+
+// RecordStartupDuration records a successful worker startup time.
+func (r *Router) RecordStartupDuration(d time.Duration) {
+	r.startupMu.Lock()
+	defer r.startupMu.Unlock()
+	r.startupDurations = append(r.startupDurations, d)
+	if len(r.startupDurations) > 200 {
+		r.startupDurations = r.startupDurations[len(r.startupDurations)-200:]
+	}
+}
+
+// RecordStartupFailure increments the failed startup counter.
+func (r *Router) RecordStartupFailure() {
+	r.startupMu.Lock()
+	defer r.startupMu.Unlock()
+	r.startupFailures++
+}
+
+// StartupStats returns computed startup time statistics.
+type StartupStats struct {
+	AvgDuration    time.Duration
+	P95Duration    time.Duration
+	FailedStartups int
+	TotalStartups  int
+}
+
+// GetStartupStats computes and returns startup time statistics.
+func (r *Router) GetStartupStats() StartupStats {
+	r.startupMu.Lock()
+	defer r.startupMu.Unlock()
+
+	stats := StartupStats{
+		FailedStartups: r.startupFailures,
+		TotalStartups:  len(r.startupDurations) + r.startupFailures,
+	}
+
+	n := len(r.startupDurations)
+	if n == 0 {
+		return stats
+	}
+
+	var sum float64
+	sorted := make([]float64, n)
+	for i, d := range r.startupDurations {
+		s := d.Seconds()
+		sum += s
+		sorted[i] = s
+	}
+	stats.AvgDuration = time.Duration(sum/float64(n)) * time.Second
+
+	// Sort and compute P95
+	sortFloat64s(sorted)
+	p95Idx := int(float64(n) * 0.95)
+	if p95Idx >= n {
+		p95Idx = n - 1
+	}
+	stats.P95Duration = time.Duration(sorted[p95Idx]) * time.Second
+
+	return stats
 }
 
 func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatRequest) (ChatResponse, error) {

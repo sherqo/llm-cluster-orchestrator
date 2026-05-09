@@ -73,11 +73,12 @@ type Model struct {
 	spinner  spinner.Model
 
 	// State
-	sessions     []Session
-	activeIdx    int  // index into sessions
-	loading      bool // waiting for API response
-	focus        focus
-	sessionCount int // monotonically increasing ID counter
+	sessions       []Session
+	activeIdx      int  // index into sessions
+	loading        bool // waiting for API response
+	focus          focus
+	sessionCount   int  // monotonically increasing ID counter
+	sidebarVisible bool
 }
 
 // New creates a fully initialized Model.
@@ -100,11 +101,12 @@ func New(cfg Config) Model {
 	sp.Style = styleSpinner
 
 	m := Model{
-		cfg:      cfg,
-		input:    ta,
-		viewport: vp,
-		spinner:  sp,
-		focus:    focusInput,
+		cfg:            cfg,
+		input:          ta,
+		viewport:       vp,
+		spinner:        sp,
+		focus:          focusInput,
+		sidebarVisible: true,
 	}
 	m.newSession() // create the first session
 	return m
@@ -187,6 +189,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 
+		// Toggle sidebar visibility
+		case "ctrl+b":
+			m.sidebarVisible = !m.sidebarVisible
+			m.relayout()
+			m.refreshViewport()
+			return m, nil
+
 		// Switch focus: Tab cycles between sidebar / input
 		case "tab":
 			if m.focus == focusInput {
@@ -268,6 +277,10 @@ func (m Model) View() string {
 		return "Loading…"
 	}
 
+	if !m.sidebarVisible {
+		return m.renderChatArea()
+	}
+
 	sidebar := m.renderSidebar()
 	chatArea := m.renderChatArea()
 
@@ -279,7 +292,10 @@ func (m Model) View() string {
 // ---------------------------------------------------------------------------
 
 func (m *Model) relayout() {
-	chatWidth := m.width - sidebarWidth - 1 // -1 for border
+	chatWidth := m.width
+	if m.sidebarVisible {
+		chatWidth = m.width - sidebarWidth - 1 // -1 for border
+	}
 	if chatWidth < 20 {
 		chatWidth = 20
 	}
@@ -340,7 +356,7 @@ func (m Model) renderSidebar() string {
 	}
 
 	// Bottom hint
-	hint := styleMetaBubble.Width(sidebarWidth - 2).Render("  Tab ⇄  ^N new  ^D del")
+	hint := styleMetaBubble.Width(sidebarWidth - 2).Render("  Tab ⇄  ^N new  ^D del  ^B hide")
 	b.WriteString("\n" + hint)
 
 	return styleSidebar.
@@ -354,7 +370,10 @@ func (m Model) renderSidebar() string {
 // ---------------------------------------------------------------------------
 
 func (m Model) renderChatArea() string {
-	chatWidth := m.width - sidebarWidth - 1
+	chatWidth := m.width
+	if m.sidebarVisible {
+		chatWidth = m.width - sidebarWidth - 1
+	}
 	if chatWidth < 20 {
 		chatWidth = 20
 	}

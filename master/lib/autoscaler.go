@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -126,6 +127,51 @@ type agentHealth struct {
 // Autoscaler
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Snapshot types for TUI debugging
+// ---------------------------------------------------------------------------
+
+// AutoscalerSnapshot is a point-in-time view of the autoscaler's full state.
+type AutoscalerSnapshot struct {
+	Config AutoscalerConfig
+	Metrics ClusterMetrics
+
+	ScalingInOp     bool
+	LastScaleUp     time.Time
+	LastScaleDown   time.Time
+
+	// Sustained condition tracking
+	HighLoadSince time.Time
+	LowLoadSince  time.Time
+	HighLoadSet   bool
+	LowLoadSet    bool
+
+	// Agent health
+	AgentHealth map[string]AgentHealthSnapshot
+
+	// Decision debugging
+	ScalingDecision   string        // "none", "scale_up", "scale_down"
+	DecisionReason    string        // human-readable reason
+	DesiredWorkers    int           // calculated desired workers count
+	CooldownRemaining time.Duration // remaining cooldown until next action
+
+	// Scaling actions history (for oscillation detection)
+	RecentActions []ScalingAction
+}
+
+type AgentHealthSnapshot struct {
+	ConsecutiveFailures int
+	LastFailure         time.Time
+	PenalizedUntil      time.Time
+}
+
+type ScalingAction struct {
+	Time   time.Time
+	Action string // "up" or "down"
+	Count  int
+	Reason string
+}
+
 // Autoscaler is the main autoscaling engine.
 type Autoscaler struct {
 	cfg     AutoscalerConfig
@@ -147,6 +193,15 @@ type Autoscaler struct {
 	// Agent health tracking (#11)
 	agentHealthMu sync.Mutex
 	agentHealth   map[string]*agentHealth
+
+	// Decision debugging state
+	lastDecision       string
+	lastDecisionReason string
+	lastDesiredCount   int
+
+	// Scaling actions history (ring buffer, keep last 50)
+	actionsMu    sync.Mutex
+	recentActions []ScalingAction
 }
 
 // NewAutoscaler creates a new autoscaler with the given configuration.
@@ -178,15 +233,25 @@ func (as *Autoscaler) tick() {
 	// Collect fresh metrics
 	m := as.metrics.Collect(as.router)
 
+	// Reset decision debugging state
+	as.lastDecision = "none"
+	as.lastDecisionReason = "metrics normal"
+	as.lastDesiredCount = m.HealthyWorkers
+
 	// If no workers exist and we have agents, bootstrap minimum workers.
 	// Respect cooldown to prevent spamming when agents are unreachable.
 	if m.HealthyWorkers == 0 && m.TotalWorkers == 0 {
 		now := time.Now()
 		if !as.lastScaleUp.IsZero() && now.Sub(as.lastScaleUp) < as.cfg.ScaleUpCooldown {
+			as.lastDecision = "none"
+			as.lastDecisionReason = "in scale-up cooldown"
 			return // still in cooldown from last attempt
 		}
 		agents := as.router.GetAgents()
 		if len(agents) > 0 && as.cfg.MinWorkers > 0 {
+			as.lastDecision = "scale_up"
+			as.lastDecisionReason = "bootstrapping: no workers available"
+			as.lastDesiredCount = as.cfg.MinWorkers
 			monitoring.Verbose("autoscaler", "no workers, bootstrapping minimum")
 			as.scaleUp(as.cfg.MinWorkers, m)
 		}
@@ -201,16 +266,55 @@ func (as *Autoscaler) tick() {
 
 	// Predictive: if traffic trend is strongly positive, prewarm
 	if !scaleUpNeeded && m.RPSTrend > as.cfg.RPSTrendThreshold {
-		monitoring.Verbose("autoscaler", fmt.Sprintf("predictive: RPS trend=%.2f, prewarming %d workers", m.RPSTrend, as.cfg.PrewarmWorkers))
+		reason := fmt.Sprintf("predictive: RPS trend=%.2f exceeds threshold=%.2f", m.RPSTrend, as.cfg.RPSTrendThreshold)
+		as.lastDecision = "scale_up"
+		as.lastDecisionReason = reason
+		as.lastDesiredCount = as.cfg.PrewarmWorkers
+		monitoring.Verbose("autoscaler", reason)
 		scaleUpNeeded = true
 		scaleUpCount = as.cfg.PrewarmWorkers
 	}
 
 	// Act — only one direction per tick, scale-up takes priority
 	if scaleUpNeeded {
+		as.lastDecision = "scale_up"
+		as.lastDesiredCount = scaleUpCount
+		// Build detailed reason
+		reasons := []string{}
+		if m.WorkerUtilization > as.cfg.ScaleUpThreshold {
+			reasons = append(reasons, fmt.Sprintf("utilization %.0f%% > threshold %.0f%%", m.WorkerUtilization*100, as.cfg.ScaleUpThreshold*100))
+		}
+		if m.P95Latency > as.cfg.P95LatencyCeiling {
+			reasons = append(reasons, fmt.Sprintf("P95 %.2fs > ceiling %.1fs", m.P95Latency, as.cfg.P95LatencyCeiling))
+		}
+		if m.QueueDepth > float64(m.HealthyWorkers) {
+			reasons = append(reasons, fmt.Sprintf("queue %.1f > workers %d", m.QueueDepth, m.HealthyWorkers))
+		}
+		if len(reasons) == 0 {
+			reasons = append(reasons, fmt.Sprintf("sustained high load since %s", as.highLoadSince.Format("15:04:05")))
+		}
+		as.lastDecisionReason = strings.Join(reasons, "; ")
 		as.scaleUp(scaleUpCount, m)
 	} else if scaleDownNeeded {
+		as.lastDecision = "scale_down"
+		as.lastDesiredCount = m.HealthyWorkers - scaleDownCount
+		as.lastDecisionReason = fmt.Sprintf("utilization %.0f%% < threshold %.0f%%, removing %d workers",
+			m.WorkerUtilization*100, as.cfg.ScaleDownThreshold*100, scaleDownCount)
 		as.scaleDown(scaleDownCount, m)
+	} else {
+		// Still update reason for "none" case
+		if as.highLoadSet {
+			remaining := as.cfg.ScaleUpSustained - time.Since(as.highLoadSince)
+			if remaining > 0 {
+				as.lastDecisionReason = fmt.Sprintf("high load detected, %.0fs until scale-up sustained", remaining.Seconds())
+			}
+		}
+		if as.lowLoadSet {
+			remaining := as.cfg.ScaleDownSustained - time.Since(as.lowLoadSince)
+			if remaining > 0 {
+				as.lastDecisionReason = fmt.Sprintf("low load detected, %.0fs until scale-down sustained", remaining.Seconds())
+			}
+		}
 	}
 }
 
@@ -430,6 +534,7 @@ func (as *Autoscaler) scaleUp(count int, m ClusterMetrics) {
 
 	if spawned > 0 {
 		as.highLoadSet = false
+		as.recordScalingAction("up", spawned, fmt.Sprintf("util=%.0f%% rps=%.1f p95=%.2fs queue=%.1f", m.WorkerUtilization*100, m.RequestsPerSec, m.P95Latency, m.QueueDepth))
 		monitoring.Verbose("autoscaler", fmt.Sprintf("scale-up complete: spawned %d/%d workers", spawned, count))
 	} else {
 		monitoring.Verbose("autoscaler", fmt.Sprintf("scale-up failed: 0/%d workers spawned, cooldown %s", count, as.cfg.ScaleUpCooldown))
@@ -469,6 +574,7 @@ func (as *Autoscaler) scaleDown(count int, m ClusterMetrics) {
 	if drained > 0 {
 		as.lastScaleDown = time.Now()
 		as.lowLoadSet = false
+		as.recordScalingAction("down", drained, fmt.Sprintf("util=%.0f%% rps=%.1f queue=%.1f workers=%d", m.WorkerUtilization*100, m.RequestsPerSec, m.QueueDepth, m.HealthyWorkers))
 		monitoring.Verbose("autoscaler", fmt.Sprintf("scale-down initiated: draining %d workers", drained))
 	}
 }
@@ -641,6 +747,15 @@ func (as *Autoscaler) spawnWorkerOnAgent(agentAddr, agentID string) error {
 		return fmt.Errorf("agent returned status %d", resp.StatusCode)
 	}
 
+	var result struct {
+		WorkerID string `json:"worker_id"`
+		Address  string `json:"address"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.WorkerID != "" {
+		w := NewStartingWorker(result.WorkerID, result.Address, agentID)
+		as.router.AddWorkerWithInstance(w)
+	}
+
 	monitoring.Verbose("autoscaler", fmt.Sprintf(
 		"spawn request accepted by agent %s — waiting for /workers/ready callback",
 		agentID,
@@ -686,5 +801,83 @@ func (as *Autoscaler) resetAgentFailure(agentID string) {
 	if h, ok := as.agentHealth[agentID]; ok {
 		h.consecutiveFailures = 0
 		h.penalizedUntil = time.Time{}
+	}
+}
+
+// recordScalingAction records a scaling action for oscillation/overscaling detection.
+func (as *Autoscaler) recordScalingAction(action string, count int, reason string) {
+	as.actionsMu.Lock()
+	defer as.actionsMu.Unlock()
+
+	as.recentActions = append(as.recentActions, ScalingAction{
+		Time:   time.Now(),
+		Action: action,
+		Count:  count,
+		Reason: reason,
+	})
+	// Keep last 50
+	if len(as.recentActions) > 50 {
+		as.recentActions = as.recentActions[len(as.recentActions)-50:]
+	}
+}
+
+// Snapshot returns a point-in-time view of the autoscaler for the TUI.
+func (as *Autoscaler) Snapshot() AutoscalerSnapshot {
+	as.scalingMu.Lock()
+	defer as.scalingMu.Unlock()
+
+	m := as.metrics.Snapshot()
+
+	as.agentHealthMu.Lock()
+	ah := make(map[string]AgentHealthSnapshot, len(as.agentHealth))
+	for id, h := range as.agentHealth {
+		ah[id] = AgentHealthSnapshot{
+			ConsecutiveFailures: h.consecutiveFailures,
+			LastFailure:         h.lastFailure,
+			PenalizedUntil:      h.penalizedUntil,
+		}
+	}
+	as.agentHealthMu.Unlock()
+
+	as.actionsMu.Lock()
+	actions := make([]ScalingAction, len(as.recentActions))
+	copy(actions, as.recentActions)
+	as.actionsMu.Unlock()
+
+	now := time.Now()
+	cooldownRem := time.Duration(0)
+	switch as.lastDecision {
+	case "scale_up":
+		if !as.lastScaleUp.IsZero() {
+			remaining := as.cfg.ScaleUpCooldown - now.Sub(as.lastScaleUp)
+			if remaining > 0 {
+				cooldownRem = remaining
+			}
+		}
+	case "scale_down":
+		if !as.lastScaleDown.IsZero() {
+			remaining := as.cfg.ScaleDownCooldown - now.Sub(as.lastScaleDown)
+			if remaining > 0 {
+				cooldownRem = remaining
+			}
+		}
+	}
+
+	return AutoscalerSnapshot{
+		Config:            as.cfg,
+		Metrics:           m,
+		ScalingInOp:       as.scalingInOp.Load(),
+		LastScaleUp:       as.lastScaleUp,
+		LastScaleDown:     as.lastScaleDown,
+		HighLoadSince:     as.highLoadSince,
+		LowLoadSince:      as.lowLoadSince,
+		HighLoadSet:       as.highLoadSet,
+		LowLoadSet:        as.lowLoadSet,
+		AgentHealth:       ah,
+		ScalingDecision:   as.lastDecision,
+		DecisionReason:    as.lastDecisionReason,
+		DesiredWorkers:    as.lastDesiredCount,
+		CooldownRemaining: cooldownRem,
+		RecentActions:     actions,
 	}
 }
