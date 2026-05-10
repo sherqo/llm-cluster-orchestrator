@@ -55,7 +55,8 @@ func (r *Router) RemoveWorker(id string) error {
 	if w != nil {
 		closeErr = w.Close()
 		if agentID := w.AgentID(); agentID != "" {
-			r.destroyWorkerOnAgent(w.id, agentID)
+			// Run asynchronously to prevent blocking the caller (like the TUI thread)
+			go r.destroyWorkerOnAgent(w.id, agentID)
 		}
 	}
 

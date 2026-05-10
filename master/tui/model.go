@@ -24,9 +24,10 @@ const (
 	tabLogs
 	tabStats
 	tabAutoscaling
+	tabEvents
 )
 
-var tabLabels = []string{"Workers", "Agents", "In-Flight", "Logs", "Stats", "AutoScale"}
+var tabLabels = []string{"Workers", "Agents", "In-Flight", "Logs", "Stats", "AutoScale", "Events"}
 
 // ── History ──────────────────────────────────────────────────────────────────
 
@@ -47,6 +48,7 @@ type snapshot struct {
 	agents       []lib.AgentSnapshot
 	inflight     []monitoring.InFlight
 	logs         []monitoring.LogEntry
+	events       []monitoring.LogEntry
 	recent       []monitoring.CompletedFlight
 	strategy     lib.Strategy
 	autoscaling  lib.AutoscalerSnapshot
@@ -204,6 +206,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.switchTab(tabStats)
 	case "6":
 		return m.switchTab(tabAutoscaling)
+	case "7":
+		return m.switchTab(tabEvents)
 
 	// Worker row selection (only on workers tab)
 	case "up", "k":
@@ -314,9 +318,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // switchTab changes the active tab and resets the viewport scroll to top.
-func (m model) switchTab(t tab) (tea.Model, tea.Cmd) {
+// Must be a pointer receiver so setVPContent mutates the real viewport.
+func (m *model) switchTab(t tab) (tea.Model, tea.Cmd) {
 	m.activeTab = t
-	m.setVPContent()
+	m.vp.SetContent(m.renderBody())
 	m.vp.GotoTop()
 	return m, nil
 }
@@ -334,20 +339,38 @@ func (m model) View() string {
 	if !m.vpReady {
 		return "initializing…\n"
 	}
+
+	header := m.renderHeader()
+	tabs := m.renderTabs()
+	footer := m.renderFooter()
+	vpView := m.vp.View()
+
 	content := lipgloss.JoinVertical(
 		lipgloss.Left,
-		m.renderHeader(),
-		m.renderTabs(),
-		m.vp.View(),
-		m.renderFooter(),
+		header,
+		tabs,
+		vpView,
+		footer,
 	)
-	
-	// CRITICAL: MaxHeight and MaxWidth prevent BubbleTea from printing lines that wrap
-	// or pushing the terminal history down, which causes the "UI goes out and comes in" flickering.
-	return lipgloss.NewStyle().
-		MaxWidth(m.width).
-		MaxHeight(m.height).
-		Render(content)
+
+	// Count actual lines rendered.
+	// We MUST output exactly m.height lines every frame — if we output fewer,
+	// the terminal leaves old content from the previous frame visible ("sticky" lines).
+	// If we output more, the terminal scrolls and creates the flicker the user sees.
+	lines := strings.Split(content, "\n")
+	if len(lines) < m.height {
+		// Pad with blank lines so Bubble Tea overwrites every row.
+		blank := strings.Repeat(" ", m.width)
+		for len(lines) < m.height {
+			lines = append(lines, blank)
+		}
+		content = strings.Join(lines, "\n")
+	} else if len(lines) > m.height {
+		// Hard-clip so we never push into terminal scroll history.
+		content = strings.Join(lines[:m.height], "\n")
+	}
+
+	return content
 }
 
 // ── Input mode ───────────────────────────────────────────────────────────────
@@ -396,6 +419,7 @@ func (m model) fetchSnapshotCmd() tea.Cmd {
 		agents := m.router.AgentsSnapshot()
 		inflight := m.router.InFlightSnapshot()
 		logs := monitoring.LogSnapshot(500)
+		events := monitoring.EventsSnapshot(500)
 		recent := m.router.InFlightRecent(300)
 		strategy := m.router.Strategy()
 		autoscaling := m.router.AutoscalerSnapshot()
@@ -413,6 +437,7 @@ func (m model) fetchSnapshotCmd() tea.Cmd {
 			agents:       agents,
 			inflight:     inflight,
 			logs:         logs,
+			events:       events,
 			recent:       recent,
 			strategy:     strategy,
 			autoscaling:  autoscaling,
@@ -449,6 +474,8 @@ func (m model) renderBody() string {
 		return m.renderStats()
 	case tabAutoscaling:
 		return m.renderAutoscaling()
+	case tabEvents:
+		return m.renderEvents()
 	default:
 		return m.renderWorkers()
 	}

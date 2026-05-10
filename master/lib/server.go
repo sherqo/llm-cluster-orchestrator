@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -105,8 +104,10 @@ func Serve(router *Router) {
 	go healthCheckLoop(router)
 	go admissionUpdateLoop(router, admission)
 
-	log.Printf("LB listening on :8080 (callback base: %s)", autoscalerCfg.CallbackBaseURL)
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	monitoring.Event("server", fmt.Sprintf("LB listening on :8080 (callback base: %s)", autoscalerCfg.CallbackBaseURL))
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		monitoring.Event("server", "ListenAndServe fatal: "+err.Error())
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -229,7 +230,7 @@ func agentRegisterHandler(w http.ResponseWriter, r *http.Request, router *Router
 		wk.SetAgentID(req.AgentID)
 		router.AddWorkerWithInstance(wk)
 		adopted++
-		log.Printf("[server] re-adopted surviving worker %s (%s) from agent %s", rw.WorkerID, rw.Address, req.AgentID)
+		monitoring.Event("server", fmt.Sprintf("re-adopted surviving worker %s (%s) from agent %s", rw.WorkerID, rw.Address, req.AgentID))
 	}
 
 	// Only spawn a new worker if no surviving workers were reported
@@ -283,7 +284,7 @@ func workerReadyHandler(w http.ResponseWriter, r *http.Request, router *Router) 
 	wk.SetAgentID(note.AgentID)
 	router.AddWorkerWithInstance(wk)
 
-	log.Printf("[server] worker %s registered via callback (agent: %s)", note.Address, note.AgentID)
+	monitoring.Event("server", fmt.Sprintf("worker %s registered via callback (agent: %s)", note.Address, note.AgentID))
 	monitoring.Verbose("server", "worker "+note.Address+" added via callback, agent="+note.AgentID)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -299,7 +300,7 @@ func workerReadyHandler(w http.ResponseWriter, r *http.Request, router *Router) 
 // Retries up to 3 times with 5s backoff on network errors.
 func fireSpawnRequest(agentID, agentAddr, callbackBase string, router *Router) {
 	callbackURL := callbackBase + "/workers/ready"
-	log.Printf("[server] firing spawn request to %s (callback: %s)", agentAddr, callbackURL)
+	monitoring.Event("server", fmt.Sprintf("firing spawn request to %s (callback: %s)", agentAddr, callbackURL))
 
 	body, _ := json.Marshal(map[string]string{
 		"callback_url": callbackURL,
@@ -349,7 +350,7 @@ func fireSpawnRequest(agentID, agentAddr, callbackBase string, router *Router) {
 		}
 	}
 
-	log.Printf("[server] all spawn fire attempts failed for agent %s", agentID)
+	monitoring.Event("server", fmt.Sprintf("all spawn fire attempts failed for agent %s", agentID))
 }
 
 // ---------------------------------------------------------------------------
