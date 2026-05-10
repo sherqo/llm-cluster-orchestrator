@@ -38,10 +38,17 @@ type WorkerRegisterResponse struct {
 	Status   string `json:"status"`
 }
 
+type RunningWorkerInfo struct {
+	WorkerID    string `json:"worker_id"`
+	Address     string `json:"address"`
+	ContainerID string `json:"container_id"`
+}
+
 type AgentRegisterRequest struct {
-	AgentID string `json:"agent_id"`
-	Host    string `json:"host"`
-	Port    int    `json:"port"`
+	AgentID string            `json:"agent_id"`
+	Host    string            `json:"host"`
+	Port    int               `json:"port"`
+	Workers []RunningWorkerInfo `json:"workers,omitempty"`
 }
 
 // WorkerReadyNotification is the callback payload the agent POSTs to /workers/ready
@@ -204,9 +211,36 @@ func agentRegisterHandler(w http.ResponseWriter, r *http.Request, router *Router
 		AddedAt: time.Now(),
 	})
 
-	// Fire-and-forget: ask the agent to create an initial worker.
-	// The agent will call /workers/ready when the container is up.
-	go fireSpawnRequest(req.AgentID, fmt.Sprintf("http://%s:%d", req.Host, req.Port), callbackBase, router)
+	// Re-adopt any surviving workers the agent reported
+	adopted := 0
+	for _, rw := range req.Workers {
+		if rw.WorkerID == "" {
+			continue
+		}
+		if router.WorkerExists(rw.WorkerID) {
+			monitoring.Verbose("server", "worker "+rw.WorkerID+" already registered, skipping")
+			continue
+		}
+		wk, err := NewWorker(rw.WorkerID, rw.Address)
+		if err != nil {
+			monitoring.Verbose("server", "failed to re-adopt worker "+rw.WorkerID+": "+err.Error())
+			continue
+		}
+		wk.SetAgentID(req.AgentID)
+		router.AddWorkerWithInstance(wk)
+		adopted++
+		log.Printf("[server] re-adopted surviving worker %s (%s) from agent %s", rw.WorkerID, rw.Address, req.AgentID)
+	}
+
+	// Only spawn a new worker if no surviving workers were reported
+	if len(req.Workers) == 0 {
+		go fireSpawnRequest(req.AgentID, fmt.Sprintf("http://%s:%d", req.Host, req.Port), callbackBase, router)
+	} else {
+		monitoring.Verbose("server", fmt.Sprintf(
+			"agent %s reported %d surviving workers, adopted %d — skipping initial spawn",
+			req.AgentID, len(req.Workers), adopted,
+		))
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "registered"})

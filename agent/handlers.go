@@ -208,11 +208,23 @@ func DestroyWorkerHandler(
 	}
 }
 
-func RegisterWithMaster(cfg AgentConfig) error {
+func RegisterWithMaster(cfg AgentConfig, docker *DockerManager) error {
+	var workers []RunningWorker
+	if docker != nil {
+		var err error
+		workers, err = docker.ListRunningWorkers()
+		if err != nil {
+			Verbose("register", "failed to list running workers: "+err.Error())
+		} else if len(workers) > 0 {
+			Verbose("register", fmt.Sprintf("found %d running workers to report", len(workers)))
+		}
+	}
+
 	body, err := json.Marshal(AgentRegistrationRequest{
 		AgentID: cfg.AgentID,
 		Host:    cfg.AdvertiseHost,
 		Port:    cfg.AdvertisePort,
+		Workers: workers,
 	})
 	if err != nil {
 		return err

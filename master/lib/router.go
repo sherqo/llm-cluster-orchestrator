@@ -77,6 +77,13 @@ func (r *Router) RegisterAgent(info AgentInfo) {
 	r.agents[info.AgentID] = &info
 }
 
+func (r *Router) WorkerExists(id string) bool {
+	r.workersM.RLock()
+	defer r.workersM.RUnlock()
+	_, exists := r.workers[id]
+	return exists
+}
+
 func (r *Router) AddWorkerWithInstance(w *Worker) {
 	r.workersM.Lock()
 	defer r.workersM.Unlock()

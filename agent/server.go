@@ -41,7 +41,7 @@ func main() {
 
 	if cfg.MasterURL != "" {
 		go func() {
-			if err := RegisterWithMaster(cfg); err != nil {
+			if err := RegisterWithMaster(cfg, docker); err != nil {
 				log.Printf("agent registration failed: %v", err)
 			}
 		}()
