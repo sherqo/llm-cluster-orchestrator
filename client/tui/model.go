@@ -42,6 +42,11 @@ type chatErrorMsg struct {
 
 type tickMsg time.Time
 
+type autoReplyMsg struct {
+	sessionID string
+	reply     string
+}
+
 // ---------------------------------------------------------------------------
 // Focus zones
 // ---------------------------------------------------------------------------
@@ -183,10 +188,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 
+	case autoReplyMsg:
+		m.loading = false
+		for i := range m.sessions {
+			if m.sessions[i].ID == msg.sessionID {
+				m.sessions[i].Messages = append(m.sessions[i].Messages, Message{
+					Role:    RoleAssistant,
+					Content: msg.reply,
+					At:      time.Now(),
+				})
+				break
+			}
+		}
+		m.refreshViewport()
+		return m, nil
+
 	// ── Keyboard ─────────────────────────────────────────────────────────────
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c":
+		case "ctrl+c", "ctrl+q":
 			return m, tea.Quit
 
 		// Toggle sidebar visibility
@@ -356,7 +376,7 @@ func (m Model) renderSidebar() string {
 	}
 
 	// Bottom hint
-	hint := styleMetaBubble.Width(sidebarWidth - 2).Render("  Tab ⇄  ^N new  ^D del  ^B hide")
+	hint := styleMetaBubble.Width(sidebarWidth - 2).Render("  Tab ⇄  ^N new  ^D del  ^B hide  ^Q quit")
 	b.WriteString("\n" + hint)
 
 	return styleSidebar.
@@ -415,7 +435,7 @@ func (m Model) renderChatArea() string {
 
 	// Footer / key hints
 	scrollInfo := fmt.Sprintf("↑↓ scroll  %d%%", m.scrollPercent())
-	sendHint := "Enter → send"
+	sendHint := "Enter → send  ^Q quit"
 	if m.loading {
 		sendHint = styleSpinner.Render("sending…")
 	}
@@ -451,44 +471,60 @@ func (m Model) renderMessages(s Session) string {
 }
 
 func (m Model) renderMessage(msg Message) string {
-	ts := styleMetaBubble.Render(msg.At.Format("15:04:05"))
 	maxW := m.viewport.Width
 	if maxW < 20 {
 		maxW = 80
 	}
+	bubbleMaxW := int(float64(maxW) * 0.75)
+	if bubbleMaxW < 30 {
+		bubbleMaxW = maxW - 4
+	}
+
+	ts := msg.At.Format("15:04")
 
 	switch msg.Role {
 	case RoleUser:
-		label := styleUserBubble.Render("  You")
-		meta := ts
-		header := lipgloss.JoinHorizontal(lipgloss.Bottom, label, "  ", meta)
-		body := lipgloss.NewStyle().
+		body := wordWrap(msg.Content, bubbleMaxW)
+		bubble := lipgloss.NewStyle().
+			Background(colorSurface).
 			Foreground(colorText).
+			Padding(0, 2).
+			Render(body)
+		row := lipgloss.NewStyle().Width(maxW).Align(lipgloss.Right).Render(bubble)
+		header := lipgloss.NewStyle().
 			Width(maxW).
-			Render(wordWrap(msg.Content, maxW))
-		return header + "\n" + body + "\n"
+			Align(lipgloss.Right).
+			Render(styleMetaBubble.Render(ts) + "  " + styleUserBubble.Render("You"))
+		return header + "\n" + row + "\n"
 
 	case RoleAssistant:
-		label := styleAssistantBubble.Render("  Assistant")
+		body := wordWrap(msg.Content, bubbleMaxW)
+		bubble := lipgloss.NewStyle().
+			Background(colorOverlay).
+			Foreground(colorText).
+			Padding(0, 2).
+			Render(body)
 		reqID := ""
 		if msg.RequestID != "" {
 			reqID = "  " + styleReqID.Render("req:"+truncate(msg.RequestID, 13))
 		}
-		header := lipgloss.JoinHorizontal(lipgloss.Bottom, label, reqID, "  ", ts)
-		body := lipgloss.NewStyle().
-			Foreground(colorText).
-			Width(maxW).
-			Render(wordWrap(msg.Content, maxW))
-		return header + "\n" + body + "\n"
+		header := styleAssistantBubble.Render("Assistant") + reqID + "  " + styleMetaBubble.Render(ts)
+		return header + "\n" + bubble + "\n"
 
 	case RoleError:
-		label := styleErrorBubble.Render("  Error")
-		header := lipgloss.JoinHorizontal(lipgloss.Bottom, label, "  ", ts)
-		body := styleErrorBubble.Width(maxW).Render(wordWrap(msg.Content, maxW))
-		return header + "\n" + body + "\n"
+		bubble := lipgloss.NewStyle().
+			Background(colorCrust).
+			Foreground(colorRed).
+			Padding(0, 2).
+			Render(wordWrap(msg.Content, maxW))
+		header := styleErrorBubble.Render("Error") + "  " + styleMetaBubble.Render(ts)
+		return header + "\n" + bubble + "\n"
 
 	default:
-		return styleMetaBubble.Width(maxW).Render("  "+msg.Content) + "\n"
+		return styleMetaBubble.
+			Width(maxW).
+			Align(lipgloss.Center).
+			Render(msg.Content) + "\n"
 	}
 }
 
@@ -519,6 +555,18 @@ func (m *Model) sendPrompt(prompt string) tea.Cmd {
 		Content: prompt,
 		At:      time.Now(),
 	})
+
+	if reply, ok := AutoReply(prompt); ok {
+		m.loading = true
+		m.input.Reset()
+		m.refreshViewport()
+		sessionID := session.ID
+		return func() tea.Msg {
+			time.Sleep(600 * time.Millisecond)
+			return autoReplyMsg{sessionID: sessionID, reply: reply}
+		}
+	}
+
 	m.loading = true
 	m.input.Reset()
 	m.refreshViewport()
