@@ -78,7 +78,8 @@ type Worker struct {
 	id   string // unique identifier for the worker, eg: "worker-localhost:50051"
 	addr string // address of the worker server, eg: "localhost:50051"
 
-	activeRequests atomic.Int64
+	activeRequests atomic.Int64  // raw instantaneous counter
+	displayActive  atomic.Int64  // EWMA-smoothed for TUI display
 
 	lifecycle LifecycleState // new full lifecycle state (#6)
 	status    WorkerStatus   // kept for backward compat
@@ -134,6 +135,17 @@ func NewWorker(id, addr string) (*Worker, error) {
 		conn:      conn,
 		client:    pb.NewWorkerServiceClient(conn),
 	}, nil
+}
+
+// NewStartingWorker creates a placeholder worker in StateStarting without dialing gRPC.
+func NewStartingWorker(id, addr, agentID string) *Worker {
+	return &Worker{
+		id:        id,
+		addr:      addr,
+		status:    WorkerDraining, // so it's not routable
+		lifecycle: StateStarting,
+		agentID:   agentID,
+	}
 }
 
 // method to send a request to the worker and get a response
@@ -222,6 +234,24 @@ func (w *Worker) Snapshot() WorkerSnapshot {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
+	// Apply one-pole EWMA smoothing so the TUI displays a stable trend
+	// instead of the raw instantaneous counter which jitters at sub-second timescales.
+	raw := w.activeRequests.Load()
+	prev := w.displayActive.Load()
+	var smoothed int64
+	if prev == 0 && raw == 0 {
+		smoothed = 0
+	} else if prev == 0 {
+		smoothed = raw
+	} else {
+		smoothed = int64(float64(prev)*0.7 + float64(raw)*0.3)
+		// Prevent fractional drift near zero
+		if smoothed < 1 && raw == 0 {
+			smoothed = 0
+		}
+	}
+	w.displayActive.Store(smoothed)
+
 	return WorkerSnapshot{
 		ID:             w.id,
 		Addr:           w.addr,
@@ -229,7 +259,7 @@ func (w *Worker) Snapshot() WorkerSnapshot {
 		Lifecycle:      w.lifecycle,
 		Failures:       0,
 		Successes:      0,
-		ActiveRequests: w.activeRequests.Load(),
+		ActiveRequests: smoothed,
 		AgentID:        w.agentID,
 	}
 }

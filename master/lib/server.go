@@ -38,10 +38,17 @@ type WorkerRegisterResponse struct {
 	Status   string `json:"status"`
 }
 
+type RunningWorkerInfo struct {
+	WorkerID    string `json:"worker_id"`
+	Address     string `json:"address"`
+	ContainerID string `json:"container_id"`
+}
+
 type AgentRegisterRequest struct {
-	AgentID string `json:"agent_id"`
-	Host    string `json:"host"`
-	Port    int    `json:"port"`
+	AgentID string            `json:"agent_id"`
+	Host    string            `json:"host"`
+	Port    int               `json:"port"`
+	Workers []RunningWorkerInfo `json:"workers,omitempty"`
 }
 
 // WorkerReadyNotification is the callback payload the agent POSTs to /workers/ready
@@ -72,10 +79,14 @@ func Serve(router *Router) {
 	admissionCfg := DefaultAdmissionConfig()
 	admission := NewAdmissionController(admissionCfg, metrics)
 
+	// Expose metrics and autoscaler to the router for TUI access
+	router.SetMetrics(metrics)
+
 	// Initialize the autoscaler with production defaults (#1,#3,#4,#8,#9,#10,#11,#14)
 	autoscalerCfg := DefaultAutoscalerConfig()
 	autoscalerCfg.CallbackBaseURL = masterBaseURL()
 	autoscaler := NewAutoscaler(autoscalerCfg, router, metrics)
+	router.SetAutoscaler(autoscaler)
 
 	http.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
 		chatRequestHandler(w, r, router, admission, metrics)
@@ -200,9 +211,36 @@ func agentRegisterHandler(w http.ResponseWriter, r *http.Request, router *Router
 		AddedAt: time.Now(),
 	})
 
-	// Fire-and-forget: ask the agent to create an initial worker.
-	// The agent will call /workers/ready when the container is up.
-	go fireSpawnRequest(req.AgentID, fmt.Sprintf("http://%s:%d", req.Host, req.Port), callbackBase)
+	// Re-adopt any surviving workers the agent reported
+	adopted := 0
+	for _, rw := range req.Workers {
+		if rw.WorkerID == "" {
+			continue
+		}
+		if router.WorkerExists(rw.WorkerID) {
+			monitoring.Verbose("server", "worker "+rw.WorkerID+" already registered, skipping")
+			continue
+		}
+		wk, err := NewWorker(rw.WorkerID, rw.Address)
+		if err != nil {
+			monitoring.Verbose("server", "failed to re-adopt worker "+rw.WorkerID+": "+err.Error())
+			continue
+		}
+		wk.SetAgentID(req.AgentID)
+		router.AddWorkerWithInstance(wk)
+		adopted++
+		log.Printf("[server] re-adopted surviving worker %s (%s) from agent %s", rw.WorkerID, rw.Address, req.AgentID)
+	}
+
+	// Only spawn a new worker if no surviving workers were reported
+	if len(req.Workers) == 0 {
+		go fireSpawnRequest(req.AgentID, fmt.Sprintf("http://%s:%d", req.Host, req.Port), callbackBase, router)
+	} else {
+		monitoring.Verbose("server", fmt.Sprintf(
+			"agent %s reported %d surviving workers, adopted %d — skipping initial spawn",
+			req.AgentID, len(req.Workers), adopted,
+		))
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
@@ -231,7 +269,10 @@ func workerReadyHandler(w http.ResponseWriter, r *http.Request, router *Router) 
 	))
 
 	// Register the worker — the port is already open so NewWorker connects quickly
-	workerID := "worker-" + note.Address
+	workerID := note.WorkerID
+	if workerID == "" {
+		workerID = "worker-" + note.Address
+	}
 	wk, err := NewWorker(workerID, note.Address)
 	if err != nil {
 		monitoring.Verbose("server", "worker-ready: gRPC connect failed for "+note.Address+": "+err.Error())
@@ -256,7 +297,7 @@ func workerReadyHandler(w http.ResponseWriter, r *http.Request, router *Router) 
 // fireSpawnRequest sends a /workers/create to the agent with a callback URL.
 // It returns after the agent acknowledges receipt (202) — not after the worker is ready.
 // Retries up to 3 times with 5s backoff on network errors.
-func fireSpawnRequest(agentID, agentAddr, callbackBase string) {
+func fireSpawnRequest(agentID, agentAddr, callbackBase string, router *Router) {
 	callbackURL := callbackBase + "/workers/ready"
 	log.Printf("[server] firing spawn request to %s (callback: %s)", agentAddr, callbackURL)
 
@@ -281,15 +322,23 @@ func fireSpawnRequest(agentID, agentAddr, callbackBase string) {
 			}
 			continue
 		}
-		resp.Body.Close()
-
 		if resp.StatusCode == http.StatusAccepted || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
+			var result struct {
+				WorkerID string `json:"worker_id"`
+				Address  string `json:"address"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.WorkerID != "" {
+				w := NewStartingWorker(result.WorkerID, result.Address, agentID)
+				router.AddWorkerWithInstance(w)
+			}
+			resp.Body.Close()
 			monitoring.Verbose("server", fmt.Sprintf(
 				"spawn request accepted by agent %s (status %d) — waiting for callback",
 				agentID, resp.StatusCode,
 			))
 			return
 		}
+		resp.Body.Close()
 
 		monitoring.Verbose("server", fmt.Sprintf(
 			"spawn fire attempt %d/%d to %s got status %d", attempt, maxAttempts, agentID, resp.StatusCode,
