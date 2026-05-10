@@ -17,11 +17,15 @@ package main
 import (
 	"fmt"
 
+	"log"
+	
 	"master/lib"
+	"master/monitoring"
 	"master/tui"
 )
 
 func main() {
+	log.SetOutput(monitoring.NewStdLogWriter())
 	router := lib.NewRouter()
 
 	if router.WorkerCount() == 0 {

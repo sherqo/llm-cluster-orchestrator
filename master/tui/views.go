@@ -217,6 +217,50 @@ func (m model) renderLogs() string {
 	return b.String()
 }
 
+// ── Notifications/Events tab ──────────────────────────────────────────────────
+
+func (m model) renderEvents() string {
+	var b strings.Builder
+	w := m.usableWidth()
+
+	b.WriteString(sectionTitle("System Notifications", fmt.Sprintf("%d events (scroll ↑↓)", len(m.snap.events)), w))
+
+	const prefix = "  00:00:00  [system]        "
+	prefixW := utf8.RuneCountInString(prefix)
+	wrapW := w - prefixW
+	if wrapW < 20 {
+		wrapW = 20
+	}
+
+	start := 0
+	if len(m.snap.events) > 500 {
+		start = len(m.snap.events) - 500
+	}
+	
+	for _, e := range m.snap.events[start:] {
+		ts := lipgloss.NewStyle().Foreground(clrMuted).Render(e.Time.Format("15:04:05"))
+		place := lipgloss.NewStyle().Foreground(clrPurple).Bold(true).Width(14).Render("[" + trim(e.Place, 12) + "]")
+
+		words := strings.Fields(e.Msg)
+		lines := wordWrap(words, wrapW)
+		for i, line := range lines {
+			if i == 0 {
+				b.WriteString(fmt.Sprintf("  %s  %s  %s\n", ts, place, lipgloss.NewStyle().Foreground(clrText).Render(line)))
+			} else {
+				b.WriteString(fmt.Sprintf("  %s  %s  %s\n",
+					strings.Repeat(" ", 8),
+					strings.Repeat(" ", 14),
+					lipgloss.NewStyle().Foreground(clrText).Render(line)))
+			}
+		}
+	}
+	
+	if len(m.snap.events) == 0 {
+		b.WriteString(empty("No system notifications yet"))
+	}
+	return b.String()
+}
+
 // wordWrap splits words into lines of at most maxW characters.
 func wordWrap(words []string, maxW int) []string {
 	if len(words) == 0 {
