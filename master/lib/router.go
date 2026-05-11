@@ -253,7 +253,13 @@ func (r *Router) GetStartupStats() StartupStats {
 func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatRequest) (ChatResponse, error) {
 	var lastErr error
 
-	for attemptsLeft := 3; attemptsLeft > 0; attemptsLeft-- {
+	for attempt := 0; attempt < 3; attempt++ {
+		// Boost priority on retry: treat failed requests as "pro" tier for faster processing
+		if attempt > 0 && req.Tier == "free" {
+			req.Tier = "pro"
+			monitoring.Verbose("router", "request "+requestID+" retry with boosted priority")
+		}
+
 		worker, err := r.PickWorker(req)
 		if err != nil {
 			break
@@ -269,7 +275,7 @@ func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatReque
 		}
 
 		lastErr = sendErr
-		
+
 		// If it's a deadline exceeded, the worker is just overloaded
 		if st, ok := status.FromError(sendErr); ok && st.Code() == codes.DeadlineExceeded {
 			monitoring.Verbose("router", "worker "+worker.id+" deadline exceeded (overloaded)")

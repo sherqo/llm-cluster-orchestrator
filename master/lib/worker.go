@@ -101,7 +101,7 @@ func NewWorker(id, addr string) (*Worker, error) {
 	backoff := 500 * time.Millisecond
 
 	for i := 0; i < maxAttempts; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		conn, err = grpc.DialContext(
 			ctx,
 			addr,
@@ -154,7 +154,7 @@ func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (s
 	defer w.activeRequests.Add(-1)
 
 	//TODO: the timeout should be tier aware so pro get longer timouts than free users
-	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 180*time.Second)
 	defer cancel()
 
 	resp, err := w.client.Handle(ctx, &pb.Request{
