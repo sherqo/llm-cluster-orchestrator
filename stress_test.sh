@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Configuration
-URL="http://127.0.0.1:8080/chat"
+URL="http://100.100.1.2:8080/chat"
 NUM_REQUESTS=1000
 
 echo "🔥 Starting stress test: Sending $NUM_REQUESTS parallel requests to $URL"

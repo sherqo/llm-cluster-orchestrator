@@ -239,21 +239,25 @@ func (as *Autoscaler) tick() {
 	as.lastDesiredCount = m.HealthyWorkers
 
 	// If no workers exist and we have agents, bootstrap minimum workers.
-	// Respect cooldown to prevent spamming when agents are unreachable.
+	// Skip cooldown when ALL workers are gone to prevent prolonged outages.
 	if m.HealthyWorkers == 0 && m.TotalWorkers == 0 {
-		now := time.Now()
-		if !as.lastScaleUp.IsZero() && now.Sub(as.lastScaleUp) < as.cfg.ScaleUpCooldown {
-			as.lastDecision = "none"
-			as.lastDecisionReason = "in scale-up cooldown"
-			return // still in cooldown from last attempt
-		}
 		agents := as.router.GetAgents()
 		if len(agents) > 0 && as.cfg.MinWorkers > 0 {
+			// Reset agent penalties when bootstrapping — critical to recover
+			for _, a := range agents {
+				as.resetAgentFailure(a.AgentID)
+			}
+			// Force spawn even if in cooldown — critical to recover
+			as.lastScaleUp = time.Time{}
 			as.lastDecision = "scale_up"
 			as.lastDecisionReason = "bootstrapping: no workers available"
 			as.lastDesiredCount = as.cfg.MinWorkers
-			monitoring.Verbose("autoscaler", "no workers, bootstrapping minimum")
+			monitoring.Verbose("autoscaler", "no workers, bootstrapping minimum (cooldown bypassed, penalties reset)")
 			as.scaleUp(as.cfg.MinWorkers, m)
+		} else if len(agents) == 0 {
+			as.lastDecision = "none"
+			as.lastDecisionReason = "no agents registered"
+			monitoring.Verbose("autoscaler", "no agents registered, cannot bootstrap")
 		}
 		return
 	}

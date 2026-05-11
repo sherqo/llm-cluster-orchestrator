@@ -3,8 +3,8 @@ import requests
 
 CHROMA_URL = os.getenv("CHROMA_URL", "http://localhost:8000")
 COLLECTION_NAME = os.getenv("CHROMA_COLLECTION", "documents")
-TOP_K = int(os.getenv("RAG_TOP_K", "2"))
-MAX_CHUNK_CHARS = int(os.getenv("RAG_MAX_CHARS", "150"))
+TOP_K = int(os.getenv("RAG_TOP_K", "1"))
+MAX_CHUNK_CHARS = int(os.getenv("RAG_MAX_CHARS", "50"))
 
 
 def _load_documents():
@@ -34,7 +34,13 @@ def _load_documents():
         return []
 
 
-DOCUMENTS = _load_documents()
+_DOCUMENTS = None
+
+def _get_documents():
+    global _DOCUMENTS
+    if _DOCUMENTS is None:
+        _DOCUMENTS = _load_documents()
+    return _DOCUMENTS
 
 
 def _score(doc: str, terms: list[str]) -> int:
@@ -43,7 +49,8 @@ def _score(doc: str, terms: list[str]) -> int:
 
 
 def retrieve(prompt: str, top_k: int = TOP_K) -> str:
-    if not DOCUMENTS:
+    docs = _get_documents()
+    if not docs:
         return ""
 
     terms = [t for t in prompt.lower().split() if len(t) > 2]
@@ -55,7 +62,7 @@ def retrieve(prompt: str, top_k: int = TOP_K) -> str:
 
     top_docs = [doc[:MAX_CHUNK_CHARS] for doc, s in scored[:top_k] if s > 0]
     if not top_docs:
-        top_docs = [doc[:MAX_CHUNK_CHARS] for doc in DOCUMENTS[:top_k]]
+        top_docs = [doc[:MAX_CHUNK_CHARS] for doc in docs[:top_k]]
 
     context = "\n\n".join(f"[{i+1}] {doc}" for i, doc in enumerate(top_docs))
     return context
