@@ -306,9 +306,11 @@ func (w *Worker) AgentID() string {
 	return w.agentID
 }
 
-// higher is higher and "pro" users get higher priority than "free" users. Adjust as needed.
+// higher is higher and "elite" > "pro" > "free" users. Adjust as needed.
 func tierToPriority(tier string) int32 {
 	switch tier {
+	case "elite":
+		return 10000
 	case "pro":
 		return 100
 	case "free":

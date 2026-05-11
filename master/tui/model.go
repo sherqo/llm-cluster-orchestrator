@@ -455,6 +455,9 @@ func (m *model) cycleStrategy() {
 		m.router.SetStrategy(lib.StrategyRoundRobin)
 		m.status = "strategy → round_robin"
 	case lib.StrategyRoundRobin:
+		m.router.SetStrategy(lib.StrategyRandom)
+		m.status = "strategy → random"
+	case lib.StrategyRandom:
 		m.router.SetStrategy(lib.StrategyLeastConnections)
 		m.status = "strategy → least_connections"
 	}

@@ -1,5 +1,7 @@
 package lib
 
+import "math/rand"
+
 func (w *Worker) ActiveRequests() int64 {
 	return w.activeRequests.Load()
 }
@@ -28,6 +30,8 @@ func (r *Router) pickWithStrategy(strategy Strategy) (*Worker, error) {
 		pick = r.pickLeastConnections
 	case StrategyRoundRobin:
 		pick = r.pickRoundRobin
+	case StrategyRandom:
+		pick = r.pickRandom
 	}
 
 	return pick()
@@ -101,4 +105,29 @@ func (r *Router) pickRoundRobin() (*Worker, error) {
 	}
 
 	return nil, ErrNoWorkersAvailable
+}
+
+func (r *Router) pickRandom() (*Worker, error) {
+	if len(r.workers) == 0 {
+		return nil, ErrNoWorkersAvailable
+	}
+
+	// Collect routable workers
+	workers := make([]*Worker, 0, len(r.workers))
+	for _, worker := range r.workers {
+		if !worker.isRoutable() {
+			continue
+		}
+		if worker.ActiveRequests() >= 50 {
+			continue
+		}
+		workers = append(workers, worker)
+	}
+
+	if len(workers) == 0 {
+		return nil, ErrNoWorkersAvailable
+	}
+
+	idx := rand.Intn(len(workers))
+	return workers[idx], nil
 }

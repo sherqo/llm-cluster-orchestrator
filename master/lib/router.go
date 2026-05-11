@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,6 +34,7 @@ type Strategy string
 const (
 	StrategyRoundRobin       = "round_robin"
 	StrategyLeastConnections = "least_connections"
+	StrategyRandom           = "random"
 )
 
 // main router struct
@@ -63,6 +65,7 @@ type Router struct {
 // router methods
 
 func NewRouter() *Router {
+	rand.Seed(time.Now().UnixNano())
 	return &Router{
 		workers:  make(map[string]*Worker),
 		agents:   make(map[string]*AgentInfo),
@@ -254,10 +257,12 @@ func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatReque
 	var lastErr error
 
 	for attempt := 0; attempt < 3; attempt++ {
-		// Boost priority on retry: treat failed requests as "pro" tier for faster processing
-		if attempt > 0 && req.Tier == "free" {
-			req.Tier = "pro"
-			monitoring.Verbose("router", "request "+requestID+" retry with boosted priority")
+		// Boost priority on retry: failed requests get "elite" tier (priority 10000)
+		if attempt > 0 {
+			if req.Tier != "elite" {
+				req.Tier = "elite"
+				monitoring.Verbose("router", "request "+requestID+" retry with elite priority")
+			}
 		}
 
 		worker, err := r.PickWorker(req)
