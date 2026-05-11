@@ -38,7 +38,7 @@ def run_model(prompt: str, context: str, worker_port: int) -> str:
                 "stream": False,
                 "options": {
                     "temperature": 0.2,
-                    "num_predict": 20,
+                    "num_predict": 100,
                 },
             },
             timeout=OLLAMA_TIMEOUT_SECONDS,

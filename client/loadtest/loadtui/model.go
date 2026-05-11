@@ -227,14 +227,26 @@ func (m *Model) sendOne() tea.Cmd {
 }
 
 func runRequest(masterURL, id, userID, tier, prompt string, started time.Time) tea.Msg {
+	maxRetries := 5
+	var lastErr error
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	resp, err := sendChat(ctx, masterURL, userID, tier, prompt)
-	latency := time.Since(started)
-	if err != nil {
-		return doneMsg{ID: id, UserID: userID, Tier: tier, Prompt: prompt, Err: err, Latency: latency, Finished: time.Now()}
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		resp, err := sendChat(ctx, masterURL, userID, tier, prompt)
+		if err == nil {
+			return doneMsg{ID: id, UserID: userID, Tier: tier, Prompt: prompt, Reply: resp.Reply, Latency: time.Since(started), Finished: time.Now()}
+		}
+		lastErr = err
+		// Don't retry on client errors (4xx) - server rejected it
+		if strings.Contains(err.Error(), "server error 4") {
+			break
+		}
+		// Brief pause before retry
+		time.Sleep(100 * time.Millisecond)
 	}
-	return doneMsg{ID: id, UserID: userID, Tier: tier, Prompt: prompt, Reply: resp.Reply, Latency: latency, Finished: time.Now()}
+
+	return doneMsg{ID: id, UserID: userID, Tier: tier, Prompt: prompt, Err: lastErr, Latency: time.Since(started), Finished: time.Now()}
 }
 
 func (m Model) pickUser(seed int64) (string, string) {

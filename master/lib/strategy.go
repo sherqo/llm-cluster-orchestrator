@@ -1,6 +1,10 @@
 package lib
 
-import "math/rand"
+import (
+	"math/rand"
+
+	"master/monitoring"
+)
 
 func (w *Worker) ActiveRequests() int64 {
 	return w.activeRequests.Load()
@@ -19,7 +23,16 @@ func (r *Router) PickWorker(req ChatRequest) (*Worker, error) {
 
 	r.workersM.RLock()
 	defer r.workersM.RUnlock()
-	return r.pickWithStrategy(strategy)
+
+	worker, err := r.pickWithStrategy(strategy)
+	if err == ErrNoWorkersAvailable {
+		// No workers available - trigger autoscaler to add more
+		if r.autoscaler != nil {
+			monitoring.Verbose("router", "no workers available, triggering autoscaler")
+			go r.autoscaler.TriggerScaleUp()
+		}
+	}
+	return worker, err
 }
 
 func (r *Router) pickWithStrategy(strategy Strategy) (*Worker, error) {
@@ -62,7 +75,7 @@ func (r *Router) pickLeastConnections() (*Worker, error) {
 	
 	// Enforce capacity limit: if the best worker already has 50+ active requests,
 	// consider the whole cluster full to trigger autoscaling and 503 early.
-	if minActive >= 50 {
+	if minActive >= WorkerMaxConcurrency {
 		return nil, ErrNoWorkersAvailable
 	}
 	
@@ -97,7 +110,7 @@ func (r *Router) pickRoundRobin() (*Worker, error) {
 	}
 
 	if selected != nil {
-		if selected.ActiveRequests() >= 50 {
+		if selected.ActiveRequests() >= WorkerMaxConcurrency {
 			return nil, ErrNoWorkersAvailable
 		}
 		r.rrCounter.Add(1)
@@ -118,7 +131,7 @@ func (r *Router) pickRandom() (*Worker, error) {
 		if !worker.isRoutable() {
 			continue
 		}
-		if worker.ActiveRequests() >= 50 {
+		if worker.ActiveRequests() >= WorkerMaxConcurrency {
 			continue
 		}
 		workers = append(workers, worker)

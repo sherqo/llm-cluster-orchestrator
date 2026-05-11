@@ -81,29 +81,22 @@ type AutoscalerConfig struct {
 // DefaultAutoscalerConfig returns sensible production defaults.
 func DefaultAutoscalerConfig() AutoscalerConfig {
 	return AutoscalerConfig{
-		ScaleUpCooldown:   30 * time.Second,
-		ScaleDownCooldown: 60 * time.Second,
+		ScaleUpCooldown:   3 * time.Second,
+		ScaleDownCooldown: 5 * time.Second,
 
-		ScaleUpThreshold:   0.75,
-		ScaleDownThreshold: 0.25,
+		ScaleUpThreshold:    0.40,
+		ScaleDownThreshold: 0.10,
+		ScaleUpSustained:   2 * time.Second,
+		ScaleDownSustained: 3 * time.Second,
+		TargetUtilization:  0.50,
 
-		ScaleUpSustained:   10 * time.Second,
-		ScaleDownSustained: 30 * time.Second,
+		TickInterval: 1 * time.Second,
 
-		TargetUtilization: 0.65,
-		MaxScaleUpStep:    5,
-		MaxScaleDownStep:  2,
+		MaxScaleUpStep:    10,
+		MaxScaleDownStep:  10,
 
 		MinWorkers: 1,
-		MaxWorkers: 50,
-
-		RPSTrendThreshold: 2.0,
-		PrewarmWorkers:    1,
-
-		ErrorRateCeiling:  0.1,
-		P95LatencyCeiling: 5.0,
-
-		TickInterval: 5 * time.Second,
+		MaxWorkers: MaxWorkersPerAgent,
 
 		SpawnMaxRetries:     3,
 		SpawnRetryBackoff:   2 * time.Second,
@@ -204,6 +197,14 @@ type Autoscaler struct {
 	recentActions []ScalingAction
 }
 
+func (as *Autoscaler) maxWorkersTotal() int {
+	agents := as.router.GetAgents()
+	if len(agents) == 0 {
+		return as.cfg.MaxWorkers
+	}
+	return len(agents) * as.cfg.MaxWorkers
+}
+
 // NewAutoscaler creates a new autoscaler with the given configuration.
 func NewAutoscaler(cfg AutoscalerConfig, router *Router, metrics *MetricsCollector) *Autoscaler {
 	return &Autoscaler{
@@ -226,6 +227,43 @@ func (as *Autoscaler) Run() {
 		time.Sleep(as.cfg.TickInterval)
 		as.tick()
 	}
+}
+
+// TriggerScaleUp forces an immediate scale-up attempt, bypassing cooldown.
+// Called when router has no workers available.
+func (as *Autoscaler) TriggerScaleUp() {
+	monitoring.Verbose("autoscaler", "TriggerScaleUp called - forcing scale up")
+	m := as.metrics.Collect(as.router)
+
+	// Force cooldown bypass
+	as.lastScaleUp = time.Time{}
+
+	// Calculate how many workers we need
+	queueSize := m.QueueSize
+	if queueSize == 0 {
+		queueSize = int(m.QueueDepth)
+	}
+
+	targetWorkers := m.HealthyWorkers + (queueSize / 3) // aggressive: 1 per 3 queued
+	if targetWorkers < 1 {
+		targetWorkers = 1
+	}
+	maxWorkers := as.maxWorkersTotal()
+	if maxWorkers > 0 && targetWorkers > maxWorkers {
+		targetWorkers = maxWorkers
+	}
+
+	needed := targetWorkers - m.TotalWorkers
+	if needed <= 0 {
+		monitoring.Verbose("autoscaler", "TriggerScaleUp: no workers needed")
+		return
+	}
+	if needed > as.cfg.MaxScaleUpStep {
+		needed = as.cfg.MaxScaleUpStep
+	}
+
+	// Do immediate scale up
+	as.scaleUp(needed, m)
 }
 
 // tick is a single evaluation cycle.
@@ -262,11 +300,36 @@ func (as *Autoscaler) tick() {
 		return
 	}
 
+	// Guarantee at least one healthy worker per agent if possible.
+	{
+		agents := as.router.GetAgents()
+		if len(agents) > 0 {
+			workersByAgent := as.router.HealthyWorkerCountByAgent()
+			missing := 0
+			for _, agent := range agents {
+				if workersByAgent[agent.AgentID] == 0 {
+					missing++
+				}
+			}
+			if missing > 0 {
+				as.lastDecision = "scale_up"
+				as.lastDecisionReason = fmt.Sprintf("%d agents have zero healthy workers", missing)
+				as.lastDesiredCount = missing
+				as.scaleUp(missing, m)
+				return
+			}
+		}
+	}
+
 	// Evaluate scale-up conditions
 	scaleUpNeeded, scaleUpCount := as.evaluateScaleUp(m)
 
 	// Evaluate scale-down conditions
 	scaleDownNeeded, scaleDownCount := as.evaluateScaleDown(m)
+	agents := as.router.GetAgents()
+	maxWorkers := as.maxWorkersTotal()
+	monitoring.Verbose("autoscaler", fmt.Sprintf("tick: agents=%d maxWorkers=%d healthy=%d total=%d queue=%d scaleUp=%v scaleDown=%v",
+		len(agents), maxWorkers, m.HealthyWorkers, m.TotalWorkers, m.QueueSize, scaleUpNeeded, scaleDownNeeded))
 
 	// Predictive: if traffic trend is strongly positive, prewarm
 	if !scaleUpNeeded && m.RPSTrend > as.cfg.RPSTrendThreshold {
@@ -327,143 +390,65 @@ func (as *Autoscaler) tick() {
 // ---------------------------------------------------------------------------
 
 func (as *Autoscaler) evaluateScaleUp(m ClusterMetrics) (bool, int) {
-	now := time.Now()
+	queueSize := m.QueueSize
+	if queueSize == 0 {
+		queueSize = int(m.QueueDepth)
+	}
 
-	// Check cooldown (#1)
-	if !as.lastScaleUp.IsZero() && now.Sub(as.lastScaleUp) < as.cfg.ScaleUpCooldown {
+	// Max workers per agent
+	maxWorkers := as.maxWorkersTotal()
+	if maxWorkers > 0 && m.TotalWorkers >= maxWorkers {
 		return false, 0
 	}
 
-	// Check max workers bound
-	if as.cfg.MaxWorkers > 0 && m.TotalWorkers >= as.cfg.MaxWorkers {
-		return false, 0
+	// SUPER SIMPLE: queue/5 = workers to add
+	if queueSize > 0 {
+		targetWorkers := m.TotalWorkers + (queueSize / 5)
+		if targetWorkers < 1 {
+			targetWorkers = 1
+		}
+		if maxWorkers > 0 && targetWorkers > maxWorkers {
+			targetWorkers = maxWorkers
+		}
+		needed := targetWorkers - m.TotalWorkers
+		if needed > 0 {
+			if needed > as.cfg.MaxScaleUpStep {
+				needed = as.cfg.MaxScaleUpStep
+			}
+			return true, needed
+		}
 	}
 
-	highLoad := false
-
-	// Condition 1: utilization above threshold (#4 hysteresis — separate threshold)
-	if m.WorkerUtilization > as.cfg.ScaleUpThreshold {
-		highLoad = true
-	}
-
-	// Condition 2: P95 latency exceeds ceiling
-	if m.P95Latency > as.cfg.P95LatencyCeiling && m.HealthyWorkers > 0 {
-		highLoad = true
-	}
-
-	// Condition 3: queue is building up
-	if m.QueueDepth > float64(m.HealthyWorkers) {
-		highLoad = true
-	}
-
-	if !highLoad {
-		as.highLoadSet = false
-		return false, 0
-	}
-
-	// Sustained-duration check (#5)
-	if !as.highLoadSet {
-		as.highLoadSince = now
-		as.highLoadSet = true
-	}
-	if now.Sub(as.highLoadSince) < as.cfg.ScaleUpSustained {
-		return false, 0
-	}
-
-	// Proportional scaling: calculate how many workers we need (#8)
-	needed := as.calculateScaleUpCount(m)
-	if needed <= 0 {
-		return false, 0
-	}
-	if needed > as.cfg.MaxScaleUpStep {
-		needed = as.cfg.MaxScaleUpStep
-	}
-	if as.cfg.MaxWorkers > 0 && m.TotalWorkers+needed > as.cfg.MaxWorkers {
-		needed = as.cfg.MaxWorkers - m.TotalWorkers
-	}
-	if needed <= 0 {
-		return false, 0
-	}
-
-	return true, needed
-}
-
-// calculateScaleUpCount uses target utilization to compute desired workers. (#8)
-func (as *Autoscaler) calculateScaleUpCount(m ClusterMetrics) int {
-	if m.HealthyWorkers == 0 {
-		return as.cfg.MinWorkers
-	}
-
-	// desired = ceil(current_load / (target_utilization * max_concurrency))
-	currentLoad := m.WorkerUtilization * float64(m.HealthyWorkers)
-	desiredWorkers := math.Ceil(currentLoad / as.cfg.TargetUtilization)
-	delta := int(desiredWorkers) - m.HealthyWorkers
-	if delta < 1 {
-		delta = 1 // at least 1 if we're here
-	}
-	return delta
+	return false, 0
 }
 
 // ---------------------------------------------------------------------------
-// Scale-down evaluation (#1, #3, #4, #5)
+// Scale-down evaluation
 // ---------------------------------------------------------------------------
 
 func (as *Autoscaler) evaluateScaleDown(m ClusterMetrics) (bool, int) {
-	now := time.Now()
-
-	// Check cooldown (#1)
-	if !as.lastScaleDown.IsZero() && now.Sub(as.lastScaleDown) < as.cfg.ScaleDownCooldown {
-		return false, 0
+	// SUPER SIMPLE: if queue empty and no inflight, kill excess down to MinWorkers
+	queueSize := m.QueueSize
+	if queueSize == 0 && m.InFlight == 0 {
+		excess := m.TotalWorkers - as.cfg.MinWorkers
+		if excess > 0 {
+			// delay scale-down to avoid killing during short bursts
+			if as.lowLoadSince.IsZero() {
+				as.lowLoadSince = time.Now()
+			}
+			if time.Since(as.lowLoadSince) < 5*time.Second {
+				return false, 0
+			}
+			if excess > as.cfg.MaxScaleDownStep {
+				excess = as.cfg.MaxScaleDownStep
+			}
+			return true, excess
+		}
 	}
 
-	// Never go below minimum (#3)
-	if m.HealthyWorkers <= as.cfg.MinWorkers {
-		return false, 0
-	}
-
-	// Don't scale down if error rate is high — something is wrong, don't remove capacity
-	if m.ErrorRate > as.cfg.ErrorRateCeiling {
-		return false, 0
-	}
-
-	lowLoad := false
-
-	// Condition: utilization below scale-down threshold (#4 hysteresis)
-	if m.WorkerUtilization < as.cfg.ScaleDownThreshold && m.QueueDepth < 1 {
-		lowLoad = true
-	}
-
-	if !lowLoad {
-		as.lowLoadSet = false
-		return false, 0
-	}
-
-	// Sustained-duration check (#5)
-	if !as.lowLoadSet {
-		as.lowLoadSince = now
-		as.lowLoadSet = true
-	}
-	if now.Sub(as.lowLoadSince) < as.cfg.ScaleDownSustained {
-		return false, 0
-	}
-
-	// Proportional: how many can we safely remove?
-	excessWorkers := as.calculateScaleDownCount(m)
-	if excessWorkers <= 0 {
-		return false, 0
-	}
-	if excessWorkers > as.cfg.MaxScaleDownStep {
-		excessWorkers = as.cfg.MaxScaleDownStep
-	}
-	// Never go below minimum
-	if m.HealthyWorkers-excessWorkers < as.cfg.MinWorkers {
-		excessWorkers = m.HealthyWorkers - as.cfg.MinWorkers
-	}
-	if excessWorkers <= 0 {
-		return false, 0
-	}
-
-	return true, excessWorkers
+	// reset low-load timer if queue or inflight
+	as.lowLoadSince = time.Time{}
+	return false, 0
 }
 
 func (as *Autoscaler) calculateScaleDownCount(m ClusterMetrics) int {
@@ -515,7 +500,30 @@ func (as *Autoscaler) scaleUp(count int, m ClusterMetrics) {
 	}
 
 	spawned := 0
-	for i := 0; i < count; i++ {
+	remaining := count
+
+	// Guarantee at least one healthy worker per agent if possible.
+	if count > 0 {
+		workersByAgent := as.router.HealthyWorkerCountByAgent()
+		for _, agent := range agents {
+			if remaining == 0 {
+				break
+			}
+			if workersByAgent[agent.AgentID] == 0 {
+				err := as.spawnWorkerWithRetry(agent)
+				if err != nil {
+					monitoring.Verbose("autoscaler", fmt.Sprintf("failed to spawn on agent %s: %v", agent.AgentID, err))
+					as.recordAgentFailure(agent.AgentID)
+					continue
+				}
+				spawned++
+				remaining--
+				as.resetAgentFailure(agent.AgentID)
+			}
+		}
+	}
+
+	for i := 0; i < remaining; i++ {
 		// Pick best agent (#10 — least workers, skip penalized)
 		agent := as.pickBestAgent(agents)
 		if agent == nil {
@@ -566,12 +574,13 @@ func (as *Autoscaler) scaleDown(count int, m ClusterMetrics) {
 	))
 
 	// Find workers to drain — pick those with the least active requests
-	candidates := as.selectDrainCandidates(count)
+	candidates := as.selectDrainCandidatesPerAgent(count)
+	monitoring.Verbose("autoscaler", fmt.Sprintf("scale-down: selected %d candidates", len(candidates)))
 
 	drained := 0
 	for _, w := range candidates {
-		monitoring.Verbose("autoscaler", "draining worker "+w.ID()+" for scale-down")
-		go as.drainAndRemoveWorker(w) // safe drain in background (#7)
+		monitoring.Verbose("autoscaler", "draining worker "+w.ID()+" for scale-down, active="+fmt.Sprint(w.ActiveRequests()))
+		go as.drainAndRemoveWorker(w)
 		drained++
 	}
 
@@ -581,6 +590,60 @@ func (as *Autoscaler) scaleDown(count int, m ClusterMetrics) {
 		as.recordScalingAction("down", drained, fmt.Sprintf("util=%.0f%% rps=%.1f queue=%.1f workers=%d", m.WorkerUtilization*100, m.RequestsPerSec, m.QueueDepth, m.HealthyWorkers))
 		monitoring.Verbose("autoscaler", fmt.Sprintf("scale-down initiated: draining %d workers", drained))
 	}
+}
+
+// selectDrainCandidatesPerAgent drains only if each agent keeps >= 1 healthy worker.
+func (as *Autoscaler) selectDrainCandidatesPerAgent(count int) []*Worker {
+	as.router.workersM.RLock()
+	defer as.router.workersM.RUnlock()
+
+	// Count healthy workers per agent
+	healthyPerAgent := map[string]int{}
+	for _, w := range as.router.workers {
+		if w.GetLifecycleState() == StateHealthy {
+			agentID := w.AgentID()
+			healthyPerAgent[agentID]++
+		}
+	}
+
+	// Collect eligible workers (skip agents that would drop below 1)
+	type workerLoad struct {
+		w      *Worker
+		active int64
+	}
+
+	candidates := make([]workerLoad, 0, len(as.router.workers))
+	for _, w := range as.router.workers {
+		if w.GetLifecycleState() != StateHealthy {
+			continue
+		}
+		agentID := w.AgentID()
+		if healthyPerAgent[agentID] <= 1 {
+			continue
+		}
+		candidates = append(candidates, workerLoad{w: w, active: w.ActiveRequests()})
+	}
+
+	// Sort by active requests ascending (least busy first)
+	for i := 1; i < len(candidates); i++ {
+		key := candidates[i]
+		j := i - 1
+		for j >= 0 && candidates[j].active > key.active {
+			candidates[j+1] = candidates[j]
+			j--
+		}
+		candidates[j+1] = key
+	}
+
+	result := make([]*Worker, 0, count)
+	for i := 0; i < count && i < len(candidates); i++ {
+		w := candidates[i].w
+		result = append(result, w)
+		// decrement so we don't over-drain the same agent in this call
+		agentID := w.AgentID()
+		healthyPerAgent[agentID]--
+	}
+	return result
 }
 
 // selectDrainCandidates picks the N least-busy healthy workers for draining.
@@ -625,20 +688,24 @@ func (as *Autoscaler) selectDrainCandidates(count int) []*Worker {
 // 4. Remove from router
 func (as *Autoscaler) drainAndRemoveWorker(w *Worker) {
 	workerID := w.ID()
+	monitoring.Verbose("autoscaler", "drainAndRemoveWorker started for "+workerID)
 
 	// Step 1: Mark as draining — no new requests will be routed
 	w.SetLifecycleState(StateDraining)
-	monitoring.Verbose("autoscaler", "worker "+workerID+" now draining")
+	monitoring.Verbose("autoscaler", "worker "+workerID+" set to DRAINING")
 
 	// Step 2: Wait for active requests to complete (with timeout)
-	drainTimeout := 120 * time.Second
+	drainTimeout := 5 * time.Minute
 	deadline := time.Now().Add(drainTimeout)
 	for w.ActiveRequests() > 0 && time.Now().Before(deadline) {
+		monitoring.Verbose("autoscaler", "worker "+workerID+" waiting, active="+fmt.Sprint(w.ActiveRequests()))
 		time.Sleep(1 * time.Second)
 	}
 
 	if w.ActiveRequests() > 0 {
 		monitoring.Verbose("autoscaler", fmt.Sprintf("worker %s drain timeout with %d active requests", workerID, w.ActiveRequests()))
+	} else {
+		monitoring.Verbose("autoscaler", "worker "+workerID+" has no active requests, proceeding to remove")
 	}
 
 	// Step 3: Mark stopping and close connection
@@ -655,7 +722,7 @@ func (as *Autoscaler) drainAndRemoveWorker(w *Worker) {
 		monitoring.Verbose("autoscaler", "worker "+workerID+" removal error: "+err.Error())
 	}
 
-	monitoring.Verbose("autoscaler", "worker "+workerID+" fully removed")
+monitoring.Verbose("autoscaler", "worker "+workerID+" fully removed")
 }
 
 // ---------------------------------------------------------------------------

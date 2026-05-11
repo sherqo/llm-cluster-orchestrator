@@ -130,8 +130,8 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router, 
 	monitoring.Verbose("server", "received chat request, userId="+req.UserID+", tier="+req.Tier)
 	metrics.RecordRequest()
 
-	// Admission control (#12)
-	release, admitErr := admission.Admit(r.Context())
+	// Admission control (#12) - elite bypasses queue
+	release, admitErr := admission.Admit(r.Context(), req.Tier)
 	if admitErr != nil {
 		switch {
 		case errors.Is(admitErr, ErrAdmissionQueueFull):
@@ -143,7 +143,7 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router, 
 			http.Error(w, "request timed out in queue", http.StatusGatewayTimeout)
 		default:
 			monitoring.Verbose("server", "request rejected: "+admitErr.Error())
-			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			http.Error(w, "admission failed: "+admitErr.Error(), http.StatusServiceUnavailable)
 		}
 		metrics.RecordError()
 		return
@@ -162,20 +162,37 @@ func chatRequestHandler(w http.ResponseWriter, r *http.Request, router *Router, 
 
 	start := time.Now()
 
-	resp, err := router.HandleChat(r.Context(), requestIDStr, req)
-	if err != nil {
-		metrics.RecordError()
-		switch {
-		case errors.Is(err, ErrNoWorkersAvailable):
-			monitoring.Verbose("server", "no workers available")
-			http.Error(w, "no workers available", http.StatusServiceUnavailable)
-		case errors.Is(err, ErrWorkerFailed):
-			monitoring.Verbose("server", err.Error())
-			http.Error(w, err.Error(), http.StatusBadGateway)
-		default:
-			monitoring.Verbose("server", err.Error())
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+	// Loop until we get a worker or timeout - autoscaler will add workers
+	maxRetries := 10
+	var resp ChatResponse
+	for i := 0; i < maxRetries; i++ {
+		var handleErr error
+		resp, handleErr = router.HandleChat(r.Context(), requestIDStr, req)
+		if handleErr == nil {
+			break // success
 		}
+
+		if errors.Is(handleErr, ErrNoWorkersAvailable) {
+			// No workers - trigger autoscaler and retry, don't fail immediately
+			monitoring.Verbose("server", "no workers, waiting for scale-up (attempt "+fmt.Sprint(i+1)+")")
+			time.Sleep(500 * time.Millisecond) // wait for workers to spawn
+			continue
+		}
+
+		// Real error - fail
+		metrics.RecordError()
+		if errors.Is(handleErr, ErrWorkerFailed) {
+			http.Error(w, handleErr.Error(), http.StatusBadGateway)
+		} else {
+			http.Error(w, "request failed: "+handleErr.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	if resp.RequestID == "" { // still failed after retries
+		metrics.RecordError()
+		monitoring.Verbose("server", "request failed after retries")
+		http.Error(w, "no workers available, please retry", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -360,6 +377,7 @@ func fireSpawnRequest(agentID, agentAddr, callbackBase string, router *Router) {
 func healthCheckLoop(router *Router) {
 	for {
 		time.Sleep(5 * time.Second)
+		router.RemoveIdleDraining()
 
 		router.workersM.RLock()
 		workersToPing := make([]*Worker, 0, len(router.workers))

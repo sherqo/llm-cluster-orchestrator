@@ -187,7 +187,7 @@ func DefaultMetricsCollectorConfig() MetricsCollectorConfig {
 		LatencyWindowSize: 200,
 		RPSWindowSize:     30,
 		CollectInterval:   1 * time.Second,
-		MaxConcurrency:    50,
+		MaxConcurrency:    WorkerMaxConcurrency,
 	}
 }
 

@@ -98,8 +98,43 @@ func (r *Router) DrainWorker(id string) error {
 	if !ok {
 		return ErrWorkerNotFound
 	}
-	w.SetDraining()
+	// Kill immediately - no waiting
+	go func() {
+		w.SetLifecycleState(StateStopping)
+		w.Close()
+		r.RemoveWorker(id)
+	}()
 	return nil
+}
+
+// drainAndRemoveWorker safely removes a worker after draining.
+// It mirrors autoscaler logic for manual drains.
+func (r *Router) drainAndRemoveWorker(w *Worker) {
+	workerID := w.ID()
+
+	// Wait for active requests to finish (with timeout)
+	drainTimeout := 5 * time.Minute
+	deadline := time.Now().Add(drainTimeout)
+	for w.ActiveRequests() > 0 && time.Now().Before(deadline) {
+		time.Sleep(1 * time.Second)
+	}
+
+	if w.ActiveRequests() > 0 {
+		monitoring.Verbose("admin", fmt.Sprintf("worker %s drain timeout with %d active requests", workerID, w.ActiveRequests()))
+	}
+
+	w.SetLifecycleState(StateStopping)
+	if err := w.Close(); err != nil {
+		monitoring.Verbose("admin", "worker "+workerID+" close error: "+err.Error())
+	}
+
+	w.SetLifecycleState(StateDead)
+	if err := r.RemoveWorker(workerID); err != nil {
+		monitoring.Verbose("admin", "worker "+workerID+" removal error: "+err.Error())
+		return
+	}
+
+	monitoring.Verbose("admin", "worker "+workerID+" fully removed")
 }
 
 func (r *Router) WorkersSnapshot() []WorkerSnapshot {

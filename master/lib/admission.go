@@ -36,9 +36,9 @@ type AdmissionConfig struct {
 // DefaultAdmissionConfig returns sensible defaults.
 func DefaultAdmissionConfig() AdmissionConfig {
 	return AdmissionConfig{
-		MaxConcurrencyPerWorker: 50,
-		MaxQueueSize:            500,
-		QueueTimeout:            30 * time.Second,
+		MaxConcurrencyPerWorker: WorkerMaxConcurrency,
+		MaxQueueSize:            2000,
+		QueueTimeout:            60 * time.Second,
 	}
 }
 
@@ -68,8 +68,8 @@ func NewAdmissionController(cfg AdmissionConfig, metrics *MetricsCollector) *Adm
 
 // UpdateLimits recalculates the concurrency limit based on current healthy worker count.
 func (ac *AdmissionController) UpdateLimits(healthyWorkers int) {
-	if healthyWorkers < 1 {
-		healthyWorkers = 1
+	if healthyWorkers < 0 {
+		healthyWorkers = 0
 	}
 	newMax := int64(healthyWorkers) * int64(ac.cfg.MaxConcurrencyPerWorker)
 	ac.maxActive.Store(newMax)
@@ -77,17 +77,38 @@ func (ac *AdmissionController) UpdateLimits(healthyWorkers int) {
 
 // Admit attempts to admit a request. It blocks until the request is admitted or times out.
 // Returns a release function that MUST be called when the request completes.
-func (ac *AdmissionController) Admit(ctx context.Context) (release func(), err error) {
+// tier is "elite", "pro", or "free" - elite/pro get priority queue access
+func (ac *AdmissionController) Admit(ctx context.Context, tier string) (release func(), err error) {
 	maxActive := ac.maxActive.Load()
-
-	// Fast path: if under limit, admit immediately
 	current := ac.active.Load()
-	if current < maxActive {
-		if ac.active.Add(1) <= maxActive {
+
+	// Priority tiers can skip the queue when there's headroom
+	if tier == "elite" {
+		if current < maxActive+EliteBurstSlots {
+			ac.active.Add(1)
+			monitoring.Verbose("admission", "elite admitted (burst)")
 			return func() { ac.active.Add(-1) }, nil
 		}
-		// We went over, back off and go through the queue
-		ac.active.Add(-1)
+	}
+	if tier == "pro" {
+		if current < maxActive+ProBurstSlots {
+			ac.active.Add(1)
+			monitoring.Verbose("admission", "pro admitted (burst)")
+			return func() { ac.active.Add(-1) }, nil
+		}
+	}
+
+	// Fast path: if under limit, admit immediately
+	// Also allow queuing even if maxActive=0 (no workers) - requests wait for workers
+	if maxActive == 0 || current < maxActive {
+		if maxActive > 0 && ac.active.Add(1) <= maxActive {
+			monitoring.Verbose("admission", fmt.Sprintf("admitted active slot: active=%d max=%d", current+1, maxActive))
+			return func() { ac.active.Add(-1) }, nil
+		}
+		// No active slot or maxActive=0 - go to queue
+		if maxActive > 0 {
+			ac.active.Add(-1)
+		}
 	}
 
 	// Check if queue is full (backpressure)

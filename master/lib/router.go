@@ -62,6 +62,22 @@ type Router struct {
 	startupFailures  int
 }
 
+// RemoveIdleDraining removes draining workers with no active requests.
+func (r *Router) RemoveIdleDraining() {
+	r.workersM.RLock()
+	ids := make([]string, 0)
+	for _, w := range r.workers {
+		if w.GetLifecycleState() == StateDraining && w.ActiveRequests() == 0 {
+			ids = append(ids, w.ID())
+		}
+	}
+	r.workersM.RUnlock()
+
+	for _, id := range ids {
+		_ = r.RemoveWorker(id)
+	}
+}
+
 // router methods
 
 func NewRouter() *Router {
@@ -122,6 +138,23 @@ func (r *Router) WorkerCountByAgent() map[string]int {
 		agentID := w.AgentID()
 		if agentID != "" {
 			counts[agentID]++
+		}
+	}
+	return counts
+}
+
+// HealthyWorkerCountByAgent returns a map of agent_id → number of HEALTHY workers.
+func (r *Router) HealthyWorkerCountByAgent() map[string]int {
+	r.workersM.RLock()
+	defer r.workersM.RUnlock()
+
+	counts := make(map[string]int)
+	for _, w := range r.workers {
+		if w.GetLifecycleState() == StateHealthy {
+			agentID := w.AgentID()
+			if agentID != "" {
+				counts[agentID]++
+			}
 		}
 	}
 	return counts
