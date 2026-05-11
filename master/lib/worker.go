@@ -107,9 +107,9 @@ func NewWorker(id, addr string) (*Worker, error) {
 			addr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{
-				Time:                5 * time.Second,
-				Timeout:             3 * time.Second,
-				PermitWithoutStream: true,
+				Time:                30 * time.Second,
+				Timeout:             5 * time.Second,
+				PermitWithoutStream: false,
 			}),
 			grpc.WithBlock(),
 		)

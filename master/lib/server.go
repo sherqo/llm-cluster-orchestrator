@@ -372,6 +372,9 @@ func healthCheckLoop(router *Router) {
 		router.workersM.RUnlock()
 
 		for _, w := range workersToPing {
+			if w.ActiveRequests() > 0 {
+				continue
+			}
 			err := w.Ping()
 			if err != nil {
 				monitoring.Verbose("health", "worker "+w.ID()+" ping failed: "+err.Error())
