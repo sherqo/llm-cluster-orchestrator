@@ -6,6 +6,13 @@ option go_package = "/master/generated/";
 
 service WorkerService {
   rpc Handle (Request) returns (Response);
+  rpc Ping (PingRequest) returns (PingResponse);
+}
+
+message PingRequest {}
+
+message PingResponse {
+  string status = 1;
 }
 
 message Request {

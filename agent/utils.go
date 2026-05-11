@@ -43,6 +43,16 @@ func readConfig() (AgentConfig, error) {
 		cfg.AdvertisePort = port
 	}
 
+	if nextPort, ok := findAvailablePort(cfg.ListenAddr, cfg.AdvertisePort, cfg.AdvertisePort+20); ok {
+		if nextPort != cfg.AdvertisePort {
+			cfg.ListenAddr = replaceListenPort(cfg.ListenAddr, nextPort)
+			cfg.AdvertisePort = nextPort
+			Verbose("config", fmt.Sprintf("listen port in use, switched to %d", nextPort))
+		}
+	} else {
+		return AgentConfig{}, fmt.Errorf("no free listen port in range %d-%d", cfg.AdvertisePort, cfg.AdvertisePort+20)
+	}
+
 	if cfg.WorkerPortStart <= 0 || cfg.WorkerPortEnd < cfg.WorkerPortStart {
 		err := fmt.Errorf("invalid worker port range %d-%d", cfg.WorkerPortStart, cfg.WorkerPortEnd)
 		Verbose("config", err.Error())
@@ -79,6 +89,41 @@ func portFromListenAddr(addr string) (int, error) {
 		return 0, err
 	}
 	return port, nil
+}
+
+func replaceListenPort(addr string, port int) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Sprintf(":%d", port)
+	}
+	if host == "" {
+		return fmt.Sprintf(":%d", port)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func findAvailablePort(listenAddr string, start, end int) (int, bool) {
+	host, _, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		if strings.HasPrefix(listenAddr, ":") {
+			host = ""
+		} else {
+			host = listenAddr
+		}
+	}
+	if host == "" {
+		host = "0.0.0.0"
+	}
+
+	for p := start; p <= end; p++ {
+		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(p)))
+		if err != nil {
+			continue
+		}
+		_ = ln.Close()
+		return p, true
+	}
+	return 0, false
 }
 
 func detectAdvertiseHost() (string, error) {

@@ -14,6 +14,11 @@ import (
 	"google.golang.org/grpc/keepalive"
 )
 
+// ---------------------------------------------------------------------------
+// Worker lifecycle states (#6)
+// ---------------------------------------------------------------------------
+
+// WorkerStatus is kept for backward compatibility with snapshots.
 type WorkerStatus string
 
 const (
@@ -21,14 +26,65 @@ const (
 	WorkerDraining WorkerStatus = "draining" // worker is being drained and should not receive new requests, but can finish existing ones and then be removed
 )
 
+// LifecycleState represents the full lifecycle of a worker (#6).
+type LifecycleState int
+
+const (
+	StateStarting LifecycleState = iota // worker container created, gRPC not yet connected
+	StateWarming                        // gRPC connected, worker warming up (loading model, etc.)
+	StateHealthy                        // fully ready to serve requests
+	StateDraining                       // no new requests routed, waiting for active to finish
+	StateStopping                       // active requests done, closing connection
+	StateDead                           // fully terminated, ready for removal
+)
+
+func (ls LifecycleState) String() string {
+	switch ls {
+	case StateStarting:
+		return "STARTING"
+	case StateWarming:
+		return "WARMING"
+	case StateHealthy:
+		return "HEALTHY"
+	case StateDraining:
+		return "DRAINING"
+	case StateStopping:
+		return "STOPPING"
+	case StateDead:
+		return "DEAD"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// ToWorkerStatus converts LifecycleState to the legacy WorkerStatus for backward compat.
+func (ls LifecycleState) ToWorkerStatus() WorkerStatus {
+	switch ls {
+	case StateHealthy:
+		return WorkerHealthy
+	case StateDraining, StateStopping:
+		return WorkerDraining
+	default:
+		return WorkerDraining // non-routable states
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Worker struct
+// ---------------------------------------------------------------------------
+
 // worker struct represents a worker server
 type Worker struct {
 	id   string // unique identifier for the worker, eg: "worker-localhost:50051"
 	addr string // address of the worker server, eg: "localhost:50051"
 
-	activeRequests atomic.Int64
+	activeRequests atomic.Int64  // raw instantaneous counter
+	displayActive  atomic.Int64  // EWMA-smoothed for TUI display
 
-	status WorkerStatus
+	lifecycle LifecycleState // new full lifecycle state (#6)
+	status    WorkerStatus   // kept for backward compat
+
+	agentID string // which agent spawned this worker (#10)
 
 	// gRPC client and connection
 	client pb.WorkerServiceClient
@@ -45,15 +101,15 @@ func NewWorker(id, addr string) (*Worker, error) {
 	backoff := 500 * time.Millisecond
 
 	for i := 0; i < maxAttempts; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		conn, err = grpc.DialContext(
 			ctx,
 			addr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{
-				Time:                5 * time.Second,
-				Timeout:             3 * time.Second,
-				PermitWithoutStream: true,
+				Time:                30 * time.Second,
+				Timeout:             5 * time.Second,
+				PermitWithoutStream: false,
 			}),
 			grpc.WithBlock(),
 		)
@@ -72,12 +128,24 @@ func NewWorker(id, addr string) (*Worker, error) {
 	}
 
 	return &Worker{
-		id:     id,
-		addr:   addr,
-		status: WorkerHealthy,
-		conn:   conn,
-		client: pb.NewWorkerServiceClient(conn),
+		id:        id,
+		addr:      addr,
+		status:    WorkerHealthy,
+		lifecycle: StateHealthy,
+		conn:      conn,
+		client:    pb.NewWorkerServiceClient(conn),
 	}, nil
+}
+
+// NewStartingWorker creates a placeholder worker in StateStarting without dialing gRPC.
+func NewStartingWorker(id, addr, agentID string) *Worker {
+	return &Worker{
+		id:        id,
+		addr:      addr,
+		status:    WorkerDraining, // so it's not routable
+		lifecycle: StateStarting,
+		agentID:   agentID,
+	}
 }
 
 // method to send a request to the worker and get a response
@@ -86,7 +154,7 @@ func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (s
 	defer w.activeRequests.Add(-1)
 
 	//TODO: the timeout should be tier aware so pro get longer timouts than free users
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 180*time.Second)
 	defer cancel()
 
 	resp, err := w.client.Handle(ctx, &pb.Request{
@@ -103,18 +171,43 @@ func (w *Worker) Send(ctx context.Context, requestID string, req ChatRequest) (s
 	return resp.Reply, nil
 }
 
+func (w *Worker) Ping() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := w.client.Ping(ctx, &pb.PingRequest{})
+	return err
+}
+
+// isRoutable returns true only for workers that can accept new requests (#6).
 func (w *Worker) isRoutable() bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	return w.status == WorkerHealthy
+	return w.lifecycle == StateHealthy
 }
 
 func (w *Worker) IsHealthy() bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	return w.status == WorkerHealthy
+	return w.lifecycle == StateHealthy
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle state accessors (#6)
+// ---------------------------------------------------------------------------
+
+func (w *Worker) GetLifecycleState() LifecycleState {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.lifecycle
+}
+
+func (w *Worker) SetLifecycleState(state LifecycleState) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lifecycle = state
+	w.status = state.ToWorkerStatus()
 }
 
 func (w *Worker) GetStatus() WorkerStatus {
@@ -126,12 +219,14 @@ func (w *Worker) GetStatus() WorkerStatus {
 func (w *Worker) MarkHealthy() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.lifecycle = StateHealthy
 	w.status = WorkerHealthy
 }
 
 func (w *Worker) MarkDraining() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.lifecycle = StateDraining
 	w.status = WorkerDraining
 }
 
@@ -139,19 +234,40 @@ func (w *Worker) Snapshot() WorkerSnapshot {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
+	// Apply one-pole EWMA smoothing so the TUI displays a stable trend
+	// instead of the raw instantaneous counter which jitters at sub-second timescales.
+	raw := w.activeRequests.Load()
+	prev := w.displayActive.Load()
+	var smoothed int64
+	if prev == 0 && raw == 0 {
+		smoothed = 0
+	} else if prev == 0 {
+		smoothed = raw
+	} else {
+		smoothed = int64(float64(prev)*0.7 + float64(raw)*0.3)
+		// Prevent fractional drift near zero
+		if smoothed < 1 && raw == 0 {
+			smoothed = 0
+		}
+	}
+	w.displayActive.Store(smoothed)
+
 	return WorkerSnapshot{
 		ID:             w.id,
 		Addr:           w.addr,
 		Status:         w.status,
+		Lifecycle:      w.lifecycle,
 		Failures:       0,
 		Successes:      0,
-		ActiveRequests: w.activeRequests.Load(),
+		ActiveRequests: smoothed,
+		AgentID:        w.agentID,
 	}
 }
 
 func (w *Worker) SetDraining() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.lifecycle = StateDraining
 	w.status = WorkerDraining
 }
 
@@ -174,9 +290,27 @@ func (w *Worker) Addr() string {
 	return w.addr
 }
 
-// higher is higher and "pro" users get higher priority than "free" users. Adjust as needed.
+// ---------------------------------------------------------------------------
+// Agent tracking (#10)
+// ---------------------------------------------------------------------------
+
+func (w *Worker) SetAgentID(agentID string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.agentID = agentID
+}
+
+func (w *Worker) AgentID() string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.agentID
+}
+
+// higher is higher and "elite" > "pro" > "free" users. Adjust as needed.
 func tierToPriority(tier string) int32 {
 	switch tier {
+	case "elite":
+		return 10000
 	case "pro":
 		return 100
 	case "free":

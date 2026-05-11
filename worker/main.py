@@ -14,6 +14,7 @@ from model import run_model, get_ollama_url, OLLAMA_MODEL
 # CONFIG
 # ─────────────────────────────────────────────
 import os
+
 worker_port_env = os.getenv("WORKER_PORT")
 if worker_port_env:
     WORKER_PORT = int(worker_port_env)
@@ -63,13 +64,18 @@ class Worker(worker_pb2_grpc.WorkerServiceServicer):
     def __init__(self):
         self.queue = PriorityQueue()
 
+    def Ping(self, request, context):
+        return worker_pb2.PingResponse(status="ok")
+
     def Handle(self, request, context):
         #  determine priority from tier
         # master sends 0 for pro, 1 for free
         priority = request.priority if request.priority in (0, 1) else 1
         tier = "pro" if priority == 0 else "free"
 
-        print(f"[worker:{WORKER_PORT}] received  request_id={request.request_id} tier={tier}")
+        print(
+            f"[worker:{WORKER_PORT}] received  request_id={request.request_id} tier={tier}"
+        )
 
         #  push into priority queue
         self.queue.push(priority, request.request_id, request.message)
@@ -84,14 +90,17 @@ class Worker(worker_pb2_grpc.WorkerServiceServicer):
         print(f"[worker:{WORKER_PORT}] handling  request_id={req_id}")
 
         #  RAG — retrieve relevant context from ChromaDB
-        rag_context = retrieve(message)
+        # rag_context = retrieve(message)
+        rag_context = ""
 
         #  run this worker's private Ollama model instance
         reply = run_model(prompt=message, context=rag_context, worker_port=WORKER_PORT)
 
         #  return response + current queue depth (piggybacked)
         depth = self.queue.size()
-        print(f"[worker:{WORKER_PORT}] done      request_id={req_id} queue_depth={depth}")
+        print(
+            f"[worker:{WORKER_PORT}] done      request_id={req_id} queue_depth={depth}"
+        )
 
         return worker_pb2.Response(
             request_id=req_id,

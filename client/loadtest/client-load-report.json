@@ -1,0 +1,37 @@
+{
+  "StartTime": "2026-05-12T02:36:26.554418731+03:00",
+  "EndTime": "2026-05-12T02:49:42.859013066+03:00",
+  "Duration": 796304594333,
+  "DurationSeconds": 796.304594333,
+  "RequestsSent": 9350,
+  "RequestsOK": 3693,
+  "RequestsFailed": 5479,
+  "InFlightMax": 5061,
+  "Latency": {
+    "Count": 9172,
+    "Min": 3500313,
+    "Max": 180114462607,
+    "Avg": 99449532505,
+    "P50": 73972309154,
+    "P95": 180011843782,
+    "P99": 180025089567,
+    "MinMs": 3.5003130000000002,
+    "MaxMs": 180114.462607,
+    "AvgMs": 99449.532505,
+    "P50Ms": 73972.309154,
+    "P95Ms": 180011.843782,
+    "P99Ms": 180025.08956700002
+  },
+  "Rate": {
+    "SentPerSec": 0,
+    "CompletedPerSec": 1.4,
+    "SentPerSecOverall": 11.741738106925956,
+    "CompletedPerSecOverall": 11.518205552590894,
+    "WindowSeconds": 10
+  },
+  "FreePct": 70,
+  "PaidTier": "pro",
+  "BurstCount": 50,
+  "RateCount": 10,
+  "RateEvery": 1000000000
+}

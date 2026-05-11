@@ -63,13 +63,25 @@ func startChromaDocker(cfg AgentConfig) (bool, error) {
 	}
 
 	Verbose("chroma", "starting via docker compose in "+vectorDir)
-	cmd := exec.Command("docker-compose", "up", "-d", "--build")
-	cmd.Dir = vectorDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return false, fmt.Errorf("docker compose failed: %s", string(output))
+
+	// Try docker compose (V2) first, then fall back to docker-compose (V1)
+	cmds := [][]string{
+		{"docker", "compose", "up", "-d"},
+		{"docker-compose", "up", "-d"},
 	}
-	return true, nil
+
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = vectorDir
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			Verbose("chroma", "started with "+args[0]+" "+args[1])
+			return true, nil
+		}
+		Verbose("chroma", args[0]+" failed: "+string(output))
+	}
+
+	return false, fmt.Errorf("docker compose failed")
 }
 
 func findVectorDBDir() (string, bool) {

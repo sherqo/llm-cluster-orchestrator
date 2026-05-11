@@ -1,5 +1,11 @@
 package lib
 
+import (
+	"math/rand"
+
+	"master/monitoring"
+)
+
 func (w *Worker) ActiveRequests() int64 {
 	return w.activeRequests.Load()
 }
@@ -17,7 +23,16 @@ func (r *Router) PickWorker(req ChatRequest) (*Worker, error) {
 
 	r.workersM.RLock()
 	defer r.workersM.RUnlock()
-	return r.pickWithStrategy(strategy)
+
+	worker, err := r.pickWithStrategy(strategy)
+	if err == ErrNoWorkersAvailable {
+		// No workers available - trigger autoscaler to add more
+		if r.autoscaler != nil {
+			monitoring.Verbose("router", "no workers available, triggering autoscaler")
+			go r.autoscaler.TriggerScaleUp()
+		}
+	}
+	return worker, err
 }
 
 func (r *Router) pickWithStrategy(strategy Strategy) (*Worker, error) {
@@ -28,6 +43,8 @@ func (r *Router) pickWithStrategy(strategy Strategy) (*Worker, error) {
 		pick = r.pickLeastConnections
 	case StrategyRoundRobin:
 		pick = r.pickRoundRobin
+	case StrategyRandom:
+		pick = r.pickRandom
 	}
 
 	return pick()
@@ -41,7 +58,7 @@ func (r *Router) pickLeastConnections() (*Worker, error) {
 	var minActive int64 = -1
 
 	for _, worker := range r.workers {
-		if !worker.IsHealthy() {
+		if !worker.isRoutable() {
 			continue
 		}
 
@@ -55,6 +72,13 @@ func (r *Router) pickLeastConnections() (*Worker, error) {
 	if best == nil {
 		return nil, ErrNoWorkersAvailable
 	}
+	
+	// Enforce capacity limit: if the best worker already has 50+ active requests,
+	// consider the whole cluster full to trigger autoscaling and 503 early.
+	if minActive >= WorkerMaxConcurrency {
+		return nil, ErrNoWorkersAvailable
+	}
+	
 	return best, nil
 }
 
@@ -63,7 +87,7 @@ func (r *Router) pickRoundRobin() (*Worker, error) {
 	count := 0
 
 	for _, worker := range r.workers {
-		if !worker.IsHealthy() {
+		if !worker.isRoutable() {
 			continue
 		}
 		if count == int(r.rrCounter.Load()) {
@@ -77,7 +101,7 @@ func (r *Router) pickRoundRobin() (*Worker, error) {
 		// wrap around
 		r.rrCounter.Store(0)
 		for _, worker := range r.workers {
-			if !worker.IsHealthy() {
+			if !worker.isRoutable() {
 				continue
 			}
 			selected = worker
@@ -86,9 +110,37 @@ func (r *Router) pickRoundRobin() (*Worker, error) {
 	}
 
 	if selected != nil {
+		if selected.ActiveRequests() >= WorkerMaxConcurrency {
+			return nil, ErrNoWorkersAvailable
+		}
 		r.rrCounter.Add(1)
 		return selected, nil
 	}
 
 	return nil, ErrNoWorkersAvailable
+}
+
+func (r *Router) pickRandom() (*Worker, error) {
+	if len(r.workers) == 0 {
+		return nil, ErrNoWorkersAvailable
+	}
+
+	// Collect routable workers
+	workers := make([]*Worker, 0, len(r.workers))
+	for _, worker := range r.workers {
+		if !worker.isRoutable() {
+			continue
+		}
+		if worker.ActiveRequests() >= WorkerMaxConcurrency {
+			continue
+		}
+		workers = append(workers, worker)
+	}
+
+	if len(workers) == 0 {
+		return nil, ErrNoWorkersAvailable
+	}
+
+	idx := rand.Intn(len(workers))
+	return workers[idx], nil
 }

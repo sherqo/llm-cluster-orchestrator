@@ -3,36 +3,25 @@ import requests
 
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "smollm:135m")
 OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "120"))
-OLLAMA_URL = os.getenv("OLLAMA_URL", "").strip()
-
-WORKER_TO_OLLAMA_PORT = {
-    50051: 11435,
-    50052: 11436,
-    50053: 11437,
-}
-
-
-def get_ollama_port(worker_port: int) -> int:
-    return WORKER_TO_OLLAMA_PORT.get(worker_port, 11435)
 
 
 def get_ollama_url(worker_port: int) -> str:
-    if OLLAMA_URL:
-        return OLLAMA_URL
-    return f"http://127.0.0.1:{get_ollama_port(worker_port)}"
+    ollama_url = os.getenv("OLLAMA_URL", "").strip()
+    if ollama_url:
+        return ollama_url
+    return f"http://127.0.0.1:11434"
 
 
 def build_prompt(prompt: str, context: str) -> str:
     if context:
         return (
-            f"Use this context to answer the question. Give a direct answer only.\n\n"
-            f"Context: {context}\n\n"
-            f"Question: {prompt}\n"
-            f"Answer:"
+            f"{prompt}\n"
+            f"keep the answers short\n\n"
+            f"context: {context}\n\n"
         )
     return (
-        f"Answer this question directly: {prompt}\n"
-        f"Answer:"
+        f"{prompt}\n"
+        f"keep the answers short\n\n"
     )
 
 
@@ -49,7 +38,7 @@ def run_model(prompt: str, context: str, worker_port: int) -> str:
                 "stream": False,
                 "options": {
                     "temperature": 0.2,
-                    "num_predict": 200,  # limit response length for speed
+                    "num_predict": 100,
                 },
             },
             timeout=OLLAMA_TIMEOUT_SECONDS,

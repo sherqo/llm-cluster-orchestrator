@@ -31,12 +31,22 @@ func main() {
 
 	http.HandleFunc(
 		"/workers/create",
-		CreateWorkerHandler(docker),
+		CreateWorkerHandler(docker, cfg.MasterURL, cfg.AgentID),
+	)
+
+	http.HandleFunc(
+		"/workers/destroy",
+		DestroyWorkerHandler(docker),
+	)
+
+	http.HandleFunc(
+		"/workers/clean",
+		CleanWorkerHandler(docker),
 	)
 
 	if cfg.MasterURL != "" {
 		go func() {
-			if err := RegisterWithMaster(cfg); err != nil {
+			if err := RegisterWithMaster(cfg, docker); err != nil {
 				log.Printf("agent registration failed: %v", err)
 			}
 		}()

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -39,6 +40,8 @@ func SystemInfoHandler(
 
 func CreateWorkerHandler(
 	docker *DockerManager,
+	masterURL string,
+	agentID string,
 ) http.HandlerFunc {
 
 	return func(
@@ -67,11 +70,89 @@ func CreateWorkerHandler(
 			return
 		}
 
-		Verbose("worker", "created worker "+resp.WorkerID+" at "+resp.Address)
+		Verbose("worker", "container started: "+resp.WorkerID+" at "+resp.Address)
 
+		// Use master URL from config as priority, only fallback to request's callback URL if config is empty
+		callbackURL := ""
+		if masterURL != "" {
+			callbackURL = masterURL + "/workers/ready"
+		} else if req.CallbackURL != "" {
+			callbackURL = req.CallbackURL
+		}
+		Verbose("worker", "final callbackURL: "+callbackURL)
+
+		// If a callback URL is available, asynchronously wait for the worker
+		// gRPC port to be ready, then POST the result back to the master.
+		if callbackURL != "" {
+			go waitAndCallback(resp, callbackURL, agentID)
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(map[string]string{
+				"status":    "accepted",
+				"worker_id": resp.WorkerID,
+				"address":   resp.Address,
+			})
+			return
+		}
+
+		// Legacy: synchronous response (no callback)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
+}
+
+// waitAndCallback polls until the worker's gRPC port is reachable (max 100s),
+// then POSTs the worker-ready notification to the master's callback URL.
+func waitAndCallback(resp CreateWorkerResponse, callbackURL, agentID string) {
+	Verbose("worker", "waiting for worker "+resp.WorkerID+" to be ready at "+resp.Address)
+
+	if err := waitForPort(resp.Address, 100*time.Second); err != nil {
+		Verbose("worker", "worker "+resp.WorkerID+" never became ready: "+err.Error())
+		return
+	}
+
+	Verbose("worker", "worker "+resp.WorkerID+" is ready, notifying master")
+
+	payload, err := json.Marshal(map[string]string{
+		"worker_id":    resp.WorkerID,
+		"address":      resp.Address,
+		"agent_id":     agentID,
+		"container_id": resp.ContainerID,
+	})
+	if err != nil {
+		Verbose("worker", "failed to marshal callback payload: "+err.Error())
+		return
+	}
+
+	client := http.Client{Timeout: 10 * time.Second}
+	httpResp, err := client.Post(callbackURL, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		Verbose("worker", "callback to master failed: "+err.Error())
+		return
+	}
+	defer httpResp.Body.Close()
+
+	Verbose("worker", fmt.Sprintf("callback sent for %s, master responded %d", resp.WorkerID, httpResp.StatusCode))
+}
+
+// waitForPort TCP-polls addr (host:port) until it accepts connections or timeout elapses.
+func waitForPort(addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	backoff := 500 * time.Millisecond
+
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(backoff)
+		if backoff < 5*time.Second {
+			backoff += 500 * time.Millisecond
+		}
+	}
+	return fmt.Errorf("port %s not reachable after %s", addr, timeout)
 }
 
 func CleanWorkerHandler(
@@ -103,11 +184,57 @@ func CleanWorkerHandler(
 	}
 }
 
-func RegisterWithMaster(cfg AgentConfig) error {
+func DestroyWorkerHandler(
+	docker *DockerManager,
+) http.HandlerFunc {
+	return func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		workerID := r.URL.Query().Get("worker_id")
+		if workerID == "" {
+			http.Error(w, "worker_id is required", http.StatusBadRequest)
+			return
+		}
+
+		Verbose("worker", "destroying worker "+workerID)
+
+		err := docker.DestroyWorker(workerID)
+		if err != nil {
+			Verbose("worker", "failed to destroy: "+err.Error())
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		Verbose("worker", "destroyed worker "+workerID)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "destroyed"})
+	}
+}
+
+func RegisterWithMaster(cfg AgentConfig, docker *DockerManager) error {
+	var workers []RunningWorker
+	if docker != nil {
+		var err error
+		workers, err = docker.ListRunningWorkers()
+		if err != nil {
+			Verbose("register", "failed to list running workers: "+err.Error())
+		} else if len(workers) > 0 {
+			Verbose("register", fmt.Sprintf("found %d running workers to report", len(workers)))
+		}
+	}
+
 	body, err := json.Marshal(AgentRegistrationRequest{
 		AgentID: cfg.AgentID,
 		Host:    cfg.AdvertiseHost,
 		Port:    cfg.AdvertisePort,
+		Workers: workers,
 	})
 	if err != nil {
 		return err

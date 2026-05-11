@@ -187,3 +187,57 @@ func (d *DockerManager) CleanWorkers() (int, error) {
 
 	return count, nil
 }
+
+func (d *DockerManager) ListRunningWorkers() ([]RunningWorker, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	containers, err := d.client.ContainerList(ctx, container.ListOptions{
+		All: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var workers []RunningWorker
+	for _, c := range containers {
+		if c.Image != d.cfg.WorkerImage {
+			continue
+		}
+		if c.Labels["llm.cluster.role"] != "worker" {
+			continue
+		}
+		if c.State != "running" {
+			continue
+		}
+
+		workerID := c.Labels["llm.cluster.worker_id"]
+		hostPort := c.Labels["llm.cluster.host_port"]
+		if workerID == "" || hostPort == "" {
+			continue
+		}
+
+		workers = append(workers, RunningWorker{
+			WorkerID:    workerID,
+			Address:     fmt.Sprintf("%s:%s", d.cfg.AdvertiseHost, hostPort),
+			ContainerID: c.ID,
+		})
+	}
+
+	return workers, nil
+}
+
+func (d *DockerManager) DestroyWorker(workerID string) error {
+	ctx := context.Background()
+
+	// We can find the container by its name "llm-" + workerID
+	name := "llm-" + workerID
+	
+	// Just forcefully remove it
+	err := d.client.ContainerRemove(ctx, name, container.RemoveOptions{Force: true})
+	if err != nil {
+		return err
+	}
+	
+	return nil
+}

@@ -1,5 +1,5 @@
 /*
-* This file contains the Load Balancer / Router logic for the master server.
+ * This file contains the Load Balancer / Router logic for the master server.
  */
 
 package lib
@@ -8,11 +8,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"master/monitoring"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type AgentInfo struct {
@@ -30,6 +34,7 @@ type Strategy string
 const (
 	StrategyRoundRobin       = "round_robin"
 	StrategyLeastConnections = "least_connections"
+	StrategyRandom           = "random"
 )
 
 // main router struct
@@ -46,11 +51,37 @@ type Router struct {
 	strategyM sync.RWMutex
 
 	rrCounter atomic.Uint64
+
+	// Autoscaler and metrics (set by Serve, read by TUI)
+	metrics    *MetricsCollector
+	autoscaler *Autoscaler
+
+	// Worker startup time tracking
+	startupMu      sync.Mutex
+	startupDurations []time.Duration
+	startupFailures  int
+}
+
+// RemoveIdleDraining removes draining workers with no active requests.
+func (r *Router) RemoveIdleDraining() {
+	r.workersM.RLock()
+	ids := make([]string, 0)
+	for _, w := range r.workers {
+		if w.GetLifecycleState() == StateDraining && w.ActiveRequests() == 0 {
+			ids = append(ids, w.ID())
+		}
+	}
+	r.workersM.RUnlock()
+
+	for _, id := range ids {
+		_ = r.RemoveWorker(id)
+	}
 }
 
 // router methods
 
 func NewRouter() *Router {
+	rand.Seed(time.Now().UnixNano())
 	return &Router{
 		workers:  make(map[string]*Worker),
 		agents:   make(map[string]*AgentInfo),
@@ -65,6 +96,13 @@ func (r *Router) RegisterAgent(info AgentInfo) {
 	r.agents[info.AgentID] = &info
 }
 
+func (r *Router) WorkerExists(id string) bool {
+	r.workersM.RLock()
+	defer r.workersM.RUnlock()
+	_, exists := r.workers[id]
+	return exists
+}
+
 func (r *Router) AddWorkerWithInstance(w *Worker) {
 	r.workersM.Lock()
 	defer r.workersM.Unlock()
@@ -75,6 +113,51 @@ func (r *Router) WorkerCount() int {
 	r.workersM.RLock()
 	defer r.workersM.RUnlock()
 	return len(r.workers)
+}
+
+// HealthyWorkerCount returns the number of workers in HEALTHY state.
+func (r *Router) HealthyWorkerCount() int {
+	r.workersM.RLock()
+	defer r.workersM.RUnlock()
+	count := 0
+	for _, w := range r.workers {
+		if w.GetLifecycleState() == StateHealthy {
+			count++
+		}
+	}
+	return count
+}
+
+// WorkerCountByAgent returns a map of agent_id → number of workers from that agent (#10).
+func (r *Router) WorkerCountByAgent() map[string]int {
+	r.workersM.RLock()
+	defer r.workersM.RUnlock()
+
+	counts := make(map[string]int)
+	for _, w := range r.workers {
+		agentID := w.AgentID()
+		if agentID != "" {
+			counts[agentID]++
+		}
+	}
+	return counts
+}
+
+// HealthyWorkerCountByAgent returns a map of agent_id → number of HEALTHY workers.
+func (r *Router) HealthyWorkerCountByAgent() map[string]int {
+	r.workersM.RLock()
+	defer r.workersM.RUnlock()
+
+	counts := make(map[string]int)
+	for _, w := range r.workers {
+		if w.GetLifecycleState() == StateHealthy {
+			agentID := w.AgentID()
+			if agentID != "" {
+				counts[agentID]++
+			}
+		}
+	}
+	return counts
 }
 
 func (r *Router) GetAgents() []*AgentInfo {
@@ -88,10 +171,133 @@ func (r *Router) GetAgents() []*AgentInfo {
 	return agents
 }
 
+// AgentSnapshot is a point-in-time view of an agent for the TUI.
+type AgentSnapshot struct {
+	AgentID     string
+	Host        string
+	Port        int
+	WorkerCount int
+	AddedAt     time.Time
+}
+
+// AgentsSnapshot returns a snapshot of all agents with their worker counts.
+func (r *Router) AgentsSnapshot() []AgentSnapshot {
+	r.agentsM.RLock()
+	agents := make([]*AgentInfo, 0, len(r.agents))
+	for _, a := range r.agents {
+		agents = append(agents, a)
+	}
+	r.agentsM.RUnlock()
+
+	workerCounts := r.WorkerCountByAgent()
+
+	out := make([]AgentSnapshot, 0, len(agents))
+	for _, a := range agents {
+		out = append(out, AgentSnapshot{
+			AgentID:     a.AgentID,
+			Host:        a.Host,
+			Port:        a.Port,
+			WorkerCount: workerCounts[a.AgentID],
+			AddedAt:     a.AddedAt,
+		})
+	}
+	return out
+}
+
+// SetMetrics sets the metrics collector reference for TUI access.
+func (r *Router) SetMetrics(mc *MetricsCollector) { r.metrics = mc }
+
+// SetAutoscaler sets the autoscaler reference for TUI access.
+func (r *Router) SetAutoscaler(as *Autoscaler) { r.autoscaler = as }
+
+// AutoscalerSnapshot returns the current autoscaler state for the TUI.
+func (r *Router) AutoscalerSnapshot() AutoscalerSnapshot {
+	if r.autoscaler == nil {
+		return AutoscalerSnapshot{}
+	}
+	return r.autoscaler.Snapshot()
+}
+
+// MetricsSnapshot returns the current cluster metrics.
+func (r *Router) MetricsSnapshot() ClusterMetrics {
+	if r.metrics == nil {
+		return ClusterMetrics{}
+	}
+	return r.metrics.Snapshot()
+}
+
+// RecordStartupDuration records a successful worker startup time.
+func (r *Router) RecordStartupDuration(d time.Duration) {
+	r.startupMu.Lock()
+	defer r.startupMu.Unlock()
+	r.startupDurations = append(r.startupDurations, d)
+	if len(r.startupDurations) > 200 {
+		r.startupDurations = r.startupDurations[len(r.startupDurations)-200:]
+	}
+}
+
+// RecordStartupFailure increments the failed startup counter.
+func (r *Router) RecordStartupFailure() {
+	r.startupMu.Lock()
+	defer r.startupMu.Unlock()
+	r.startupFailures++
+}
+
+// StartupStats returns computed startup time statistics.
+type StartupStats struct {
+	AvgDuration    time.Duration
+	P95Duration    time.Duration
+	FailedStartups int
+	TotalStartups  int
+}
+
+// GetStartupStats computes and returns startup time statistics.
+func (r *Router) GetStartupStats() StartupStats {
+	r.startupMu.Lock()
+	defer r.startupMu.Unlock()
+
+	stats := StartupStats{
+		FailedStartups: r.startupFailures,
+		TotalStartups:  len(r.startupDurations) + r.startupFailures,
+	}
+
+	n := len(r.startupDurations)
+	if n == 0 {
+		return stats
+	}
+
+	var sum float64
+	sorted := make([]float64, n)
+	for i, d := range r.startupDurations {
+		s := d.Seconds()
+		sum += s
+		sorted[i] = s
+	}
+	stats.AvgDuration = time.Duration(sum/float64(n)) * time.Second
+
+	// Sort and compute P95
+	sortFloat64s(sorted)
+	p95Idx := int(float64(n) * 0.95)
+	if p95Idx >= n {
+		p95Idx = n - 1
+	}
+	stats.P95Duration = time.Duration(sorted[p95Idx]) * time.Second
+
+	return stats
+}
+
 func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatRequest) (ChatResponse, error) {
 	var lastErr error
 
-	for attemptsLeft := 3; attemptsLeft > 0; attemptsLeft-- {
+	for attempt := 0; attempt < 3; attempt++ {
+		// Boost priority on retry: failed requests get "elite" tier (priority 10000)
+		if attempt > 0 {
+			if req.Tier != "elite" {
+				req.Tier = "elite"
+				monitoring.Verbose("router", "request "+requestID+" retry with elite priority")
+			}
+		}
+
 		worker, err := r.PickWorker(req)
 		if err != nil {
 			break
@@ -107,6 +313,13 @@ func (r *Router) HandleChat(ctx context.Context, requestID string, req ChatReque
 		}
 
 		lastErr = sendErr
+
+		// If it's a deadline exceeded, the worker is just overloaded
+		if st, ok := status.FromError(sendErr); ok && st.Code() == codes.DeadlineExceeded {
+			monitoring.Verbose("router", "worker "+worker.id+" deadline exceeded (overloaded)")
+		} else {
+			monitoring.Verbose("router", "worker "+worker.id+" returned error: "+sendErr.Error())
+		}
 	}
 
 	if lastErr != nil {
@@ -134,4 +347,16 @@ func (r *Router) InFlightSnapshot() []monitoring.InFlight {
 
 func (r *Router) InFlightRecent(limit int) []monitoring.CompletedFlight {
 	return r.inflight.Recent(limit)
+}
+
+// InFlightForWorker returns the number of inflight requests for a specific worker address.
+func (r *Router) InFlightForWorker(workerAddr string) int {
+	all := r.inflight.GetAll()
+	count := 0
+	for _, f := range all {
+		if f.Worker == workerAddr {
+			count++
+		}
+	}
+	return count
 }
