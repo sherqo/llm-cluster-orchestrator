@@ -1,17 +1,24 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
-	tea "github.com/charmbracelet/bubbletea"
+
 	"client/tui"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func main() {
+	masterURL := flag.String("master-url", envOrDefault("MASTER_URL", "http://localhost:8080"), "master base URL")
+	userID := flag.String("user-id", envOrDefault("USER_ID", "cli-user"), "user ID")
+	tier := flag.String("tier", envOrDefault("TIER", "standard"), "request tier")
+	flag.Parse()
+
 	cfg := tui.Config{
-		MasterURL: envOrDefault("MASTER_URL", "http://localhost:8080"),
-		UserID:    envOrDefault("USER_ID", "cli-user"),
-		Tier:      envOrDefault("TIER", "standard"),
+		MasterURL: *masterURL,
+		UserID:    *userID,
+		Tier:      *tier,
 	}
 
 	p := tea.NewProgram(

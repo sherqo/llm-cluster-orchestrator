@@ -33,11 +33,13 @@ type Config struct {
 type chatResponseMsg struct {
 	sessionID string
 	resp      chatResponse
+	duration  time.Duration
 }
 
 type chatErrorMsg struct {
 	sessionID string
 	err       error
+	duration  time.Duration
 }
 
 type tickMsg time.Time
@@ -84,6 +86,7 @@ type Model struct {
 	focus          focus
 	sessionCount   int  // monotonically increasing ID counter
 	sidebarVisible bool
+	perf           PerfStats
 }
 
 // New creates a fully initialized Model.
@@ -150,6 +153,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ── API response ─────────────────────────────────────────────────────────
 	case chatResponseMsg:
 		m.loading = false
+		m.perf.Total++
+		m.perf.OK++
+		m.perf.Last = msg.duration
+		m.perf.LastState = "ok"
+		m.perf.Latencies = append(m.perf.Latencies, msg.duration)
 		for i := range m.sessions {
 			if m.sessions[i].ID == msg.sessionID {
 				m.sessions[i].Messages = append(m.sessions[i].Messages, Message{
@@ -175,6 +183,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatErrorMsg:
 		m.loading = false
+		m.perf.Total++
+		m.perf.Errors++
+		m.perf.Last = msg.duration
+		m.perf.LastState = "err"
+		m.perf.Latencies = append(m.perf.Latencies, msg.duration)
 		for i := range m.sessions {
 			if m.sessions[i].ID == msg.sessionID {
 				m.sessions[i].Messages = append(m.sessions[i].Messages, Message{
@@ -190,6 +203,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case autoReplyMsg:
 		m.loading = false
+		m.perf.Total++
+		m.perf.OK++
+		m.perf.Last = 600 * time.Millisecond
+		m.perf.LastState = "ok"
+		m.perf.Latencies = append(m.perf.Latencies, 600*time.Millisecond)
 		for i := range m.sessions {
 			if m.sessions[i].ID == msg.sessionID {
 				m.sessions[i].Messages = append(m.sessions[i].Messages, Message{
@@ -434,13 +452,18 @@ func (m Model) renderChatArea() string {
 	}
 
 	// Footer / key hints
+	stats := m.renderPerfStats()
 	scrollInfo := fmt.Sprintf("↑↓ scroll  %d%%", m.scrollPercent())
+	leftInfo := scrollInfo
+	if stats != "" {
+		leftInfo = leftInfo + "  ·  " + stats
+	}
 	sendHint := "Enter → send  ^Q quit"
 	if m.loading {
 		sendHint = styleSpinner.Render("sending…")
 	}
 	footer := styleFooter.Width(chatWidth).Render(
-		scrollInfo + strings.Repeat(" ", max(1, chatWidth-len(scrollInfo)-len(sendHint)-4)) + sendHint,
+		leftInfo + strings.Repeat(" ", max(1, chatWidth-len(leftInfo)-len(sendHint)-4)) + sendHint,
 	)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, vp, inputBox, footer)
@@ -577,12 +600,13 @@ func (m *Model) sendPrompt(prompt string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
-
+		start := time.Now()
 		resp, err := sendChat(ctx, cfg.MasterURL, cfg.UserID, cfg.Tier, prompt)
+		dur := time.Since(start)
 		if err != nil {
-			return chatErrorMsg{sessionID: sessionID, err: err}
+			return chatErrorMsg{sessionID: sessionID, err: err, duration: dur}
 		}
-		return chatResponseMsg{sessionID: sessionID, resp: resp}
+		return chatResponseMsg{sessionID: sessionID, resp: resp, duration: dur}
 	}
 }
 
@@ -646,4 +670,70 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (m Model) renderPerfStats() string {
+	if m.perf.Total == 0 {
+		return ""
+	}
+	avg := m.perf.avg()
+	p95 := m.perf.p95()
+	status := "ok"
+	if m.perf.LastState == "err" {
+		status = "err"
+	}
+	return fmt.Sprintf("req=%d ok=%d err=%d last=%s %s avg=%s p95=%s", m.perf.Total, m.perf.OK, m.perf.Errors, fmtDuration(m.perf.Last), status, fmtDuration(avg), fmtDuration(p95))
+}
+
+func (p PerfStats) avg() time.Duration {
+	if len(p.Latencies) == 0 {
+		return 0
+	}
+	var total time.Duration
+	for _, d := range p.Latencies {
+		total += d
+	}
+	return total / time.Duration(len(p.Latencies))
+}
+
+func (p PerfStats) p95() time.Duration {
+	if len(p.Latencies) == 0 {
+		return 0
+	}
+	data := make([]time.Duration, len(p.Latencies))
+	copy(data, p.Latencies)
+	sortDurations(data)
+	idx := int(float64(len(data))*0.95) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(data) {
+		idx = len(data) - 1
+	}
+	return data[idx]
+}
+
+func sortDurations(v []time.Duration) {
+	for i := 1; i < len(v); i++ {
+		key := v[i]
+		j := i - 1
+		for j >= 0 && v[j] > key {
+			v[j+1] = v[j]
+			j--
+		}
+		v[j+1] = key
+	}
+}
+
+func fmtDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0ms"
+	}
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%.2fs", d.Seconds())
+	}
+	return fmt.Sprintf("%.1fm", d.Minutes())
 }

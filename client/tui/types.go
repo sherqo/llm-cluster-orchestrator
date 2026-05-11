@@ -22,6 +22,16 @@ type Message struct {
 	At        time.Time // wall-clock time the message arrived
 }
 
+// PerfStats tracks end-user perceived performance.
+type PerfStats struct {
+	Total     int
+	OK        int
+	Errors    int
+	Latencies []time.Duration
+	Last      time.Duration
+	LastState string // "ok" or "err"
+}
+
 // Session represents a named conversation.
 type Session struct {
 	ID        string
