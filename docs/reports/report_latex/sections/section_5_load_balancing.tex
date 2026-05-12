@@ -1,0 +1,96 @@
+\section{Load Balancing and Scheduling Design}
+
+\subsection{Routing Problem Definition}
+The routing problem in this system is to assign each incoming request to a worker that can process it quickly. This decision sits on the path of request handling, so the router must make a choice with low overhead while still considering worker health and current load. In practice, a worker is considered routable only if it is healthy and has not exceeded the configured concurrency threshold. This prevents the master from forwarding work to unavailable or saturated workers.
+
+Routing is more challenging for LLM workloads than for traditional web traffic because requests are not uniform. Some prompts are short and finish quickly, while others involve retrieval, long context windows, or extended token generation, which increases compute time significantly. If the router ignores this variability, one worker can become overloaded with expensive requests while others remain underused. Therefore, the design aims to balance three goals at once: fast decision making, fair distribution of work, and protection against overload.
+
+\begin{table}[H]
+  \centering
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabularx}{\textwidth}{@{}lX@{}}
+    \toprule
+    \textbf{Routing Requirement} & \textbf{Why It Matters} \\
+    \midrule
+    Low-latency decision & The master must choose a worker immediately so routing does not become a bottleneck itself. \\
+    Health awareness & Unhealthy or draining workers should not receive new traffic, which improves reliability. \\
+    Load awareness & Workers with too many active requests should be avoided to reduce queueing delay and timeouts. \\
+    Fairness & Requests should be spread across available workers so cluster resources are used efficiently. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Implemented Strategies}
+The router supports several strategies. The two relevant choices used in this project are least connections and round robin; a random strategy also exists for testing.
+
+\begin{table}[H]
+  \centering
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabularx}{\textwidth}{@{}lX X X@{}}
+    \toprule
+    \textbf{Strategy} & \textbf{How It Works} & \textbf{Strength} & \textbf{Weakness} \\
+    \midrule
+    Least Connections & Selects the healthy worker with the smallest number of active requests. & Adapts dynamically to uneven workloads and helps prevent hot spots. & Depends on accurate tracking of active requests and does not directly measure latency. \\
+    Round Robin & Cycles through healthy workers in a fixed sequence and assigns each new request to the next worker. & Very simple, predictable, and fair in balanced environments. & Can overload a worker if one assigned request takes much longer than others. \\
+    Random & Chooses a healthy worker at random. & Low overhead and simple to implement. & Ignores differences in current load. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+The default router behavior uses least connections because it better reflects actual pressure on the cluster. Inference requests can vary widely in prompt length, retrieval cost, and generation length, so counting active work is a more useful signal than simply rotating evenly. The implementation scans all workers, skips any worker that is not routable, and chooses the one with the minimum active request count. It also applies a hard guardrail by rejecting routing if the chosen worker has already reached the configured concurrency ceiling, which helps avoid runaway overload.
+
+\subsection{Admission Control}
+Admission control complements routing by deciding whether the system should accept more work at all. Even the best routing algorithm cannot help if every healthy worker is already busy. The master estimates total safe capacity based on the number of healthy workers multiplied by the per-worker concurrency limit. Requests beyond that capacity are placed in a bounded queue, giving the system a short buffer during traffic bursts without allowing memory usage or waiting time to grow without limit.
+
+\begin{table}[H]
+  \centering
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabularx}{\textwidth}{@{}l l X X@{}}
+    \toprule
+    \textbf{Parameter} & \textbf{Default Value} & \textbf{Purpose} & \textbf{Effect on the System} \\
+    \midrule
+    MaxConcurrencyPerWorker & 50 & Caps the number of simultaneous requests a healthy worker may process. & Protects individual workers from excessive parallelism and high latency. \\
+    MaxQueueSize & 500 & Limits how many requests may wait when all workers are busy. & Prevents unbounded queue growth and memory pressure during bursts. \\
+    QueueTimeout & 30 seconds & Sets the maximum time a request may remain queued. & Ensures clients receive a timely overload response instead of waiting indefinitely. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+This design improves resilience under heavy load. Instead of silently degrading until response times become unacceptable, the system sheds excess load in a controlled and transparent way. That behavior is especially important for interactive AI systems, because users benefit more from a clear overload message than from an extremely delayed or failed response after a long wait.
+
+\subsection{Priority Handling}
+Priority handling introduces a lightweight quality-of-service mechanism inside the worker. Requests are placed into an in-memory priority queue where elite users receive the highest priority, then pro, then free. Because lower numeric values are processed first, elite requests are served ahead of pro and free requests whenever multiple requests are waiting at the same time.
+
+\begin{table}[H]
+  \centering
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabularx}{\textwidth}{@{}l l X@{}}
+    \toprule
+    \textbf{User Tier} & \textbf{Numeric Priority} & \textbf{Scheduling Effect} \\
+    \midrule
+    Elite & 1 & Processed first when competing with lower-priority queued requests. \\
+    Pro & 2 & Processed after elite but before free traffic. \\
+    Free & 3 & Processed last when competing with higher-priority queued requests. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Dynamic Strategy Selection Under Load}
+The coursework also considered several strategy extensions that are not yet enabled in the main router but are valuable for future improvement. These strategies would make the load balancer more adaptive to real-time system behavior, user identity, or session locality. They are especially useful if the cluster grows larger or if the workload becomes more heterogeneous over time.
+
+\begin{table}[H]
+  \centering
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabularx}{\textwidth}{@{}l X X@{}}
+    \toprule
+    \textbf{Future Strategy} & \textbf{Core Idea} & \textbf{Potential Benefit} \\
+    \midrule
+    Random Routing & Selects a healthy worker at random. & Very low overhead and useful as a simple baseline for testing. \\
+    Least Response Time & Routes to the worker with the best recent latency measurements. & Avoids persistently slow workers and adapts to performance degradation. \\
+    Consistent Hashing & Maps related sessions or users to the same worker when possible. & Improves cache locality and session affinity for repeated requests. \\
+    Priority Routing & Applies user-tier decisions at the router before requests reach workers. & Provides stronger end-to-end quality-of-service guarantees across the cluster. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Among these options, least response time and priority-aware routing are the most practical next steps for this project. The first would let the system react to observed performance rather than only active request counts, while the second would move service differentiation earlier in the processing pipeline. Together, they would make the scheduling layer smarter, more responsive, and better aligned with real production-style requirements.

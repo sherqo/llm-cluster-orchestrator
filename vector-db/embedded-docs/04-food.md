@@ -1,0 +1,1 @@
+Food is a popular topic. People discuss meals, restaurants, recipes, and share food recommendations.

@@ -34,35 +34,24 @@ def _load_documents():
         return []
 
 
-_DOCUMENTS = None
-
-def _get_documents():
-    global _DOCUMENTS
-    if _DOCUMENTS is None:
-        _DOCUMENTS = _load_documents()
-    return _DOCUMENTS
-
-
-def _score(doc: str, terms: list[str]) -> int:
-    text = doc.lower()
-    return sum(text.count(t) for t in terms if t)
-
+_DOCUMENTS = _load_documents()
 
 def retrieve(prompt: str, top_k: int = TOP_K) -> str:
-    docs = _get_documents()
-    if not docs:
+    if not _DOCUMENTS:
         return ""
 
-    terms = [t for t in prompt.lower().split() if len(t) > 2]
-    scored = sorted(
-        ((doc, _score(doc, terms)) for doc in DOCUMENTS),
-        key=lambda x: x[1],
-        reverse=True,
-    )
+    prompt_lower = prompt.lower()
+    words = [w for w in prompt_lower.split() if len(w) > 2]
 
-    top_docs = [doc[:MAX_CHUNK_CHARS] for doc, s in scored[:top_k] if s > 0]
-    if not top_docs:
-        top_docs = [doc[:MAX_CHUNK_CHARS] for doc in docs[:top_k]]
+    best_doc = ""
+    best_score = 0
+    for doc in _DOCUMENTS:
+        doc_lower = doc.lower()
+        score = sum(1 for w in words if w in doc_lower)
+        if score > best_score:
+            best_score = score
+            best_doc = doc
 
-    context = "\n\n".join(f"[{i+1}] {doc}" for i, doc in enumerate(top_docs))
-    return context
+    if best_score > 0:
+        return best_doc[:MAX_CHUNK_CHARS]
+    return ""

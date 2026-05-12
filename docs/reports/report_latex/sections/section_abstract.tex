@@ -1,0 +1,8 @@
+\section*{Abstract}
+\addcontentsline{toc}{section}{Abstract}
+
+Large Language Model services are expensive, slow compared with ordinary web requests, and sensitive to sudden bursts of traffic. A single inference server can become a bottleneck because each request may require token generation, retrieval of supporting context, and GPU or CPU computation. The project solves this problem by designing a distributed LLM cluster orchestrator that accepts many client requests, chooses suitable workers, executes inference in parallel, and monitors cluster health.
+
+The implemented system is organized around a Go master/load balancer, Go agents that manage local worker containers, and Python worker nodes that expose a gRPC service. The worker integrates Retrieval-Augmented Generation through a Chroma-backed document store and uses Ollama as the local model runtime. The master provides HTTP endpoints for clients and agents, tracks in-flight work, applies admission control, records latency and error metrics, and runs an autoscaling loop.
+
+The main distributed computing techniques used are request routing, least-connections scheduling, round-robin scheduling, bounded admission control, asynchronous metrics collection, worker lifecycle management, gRPC keepalive, retry-oriented routing, and autoscaling with cooldowns and hysteresis. Testing is supported by stress-test scripts that generate up to 1000 parallel requests and gradual bursts designed to observe autoscaling behavior.

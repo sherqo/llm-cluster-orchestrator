@@ -1,0 +1,1 @@
+People discuss movies, music, and TV shows. They ask for recommendations and share their favorites.

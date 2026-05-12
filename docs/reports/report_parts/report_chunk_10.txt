@@ -1,0 +1,599 @@
+/system/info
+
+
+Returns CPU, memory, and OS information
+
+/workers/create
+
+
+Creates a new Worker container
+
+/workers/destroy
+
+
+Removes a specific Worker container
+
+/workers/clean
+
+
+Removes all Worker containers
+
+agent/docker.go
+
+This file contains the Docker management logic. It creates Worker containers, assigns ports, passes environment variables, labels containers, starts containers, lists running Workers, and removes Workers.
+
+agent/ollama.go
+
+This file starts or checks the local Ollama service. Ollama is used as the LLM runtime.
+
+agent/chroma.go
+
+This file starts or checks the ChromaDB service. ChromaDB is used for document retrieval in the RAG pipeline.
+
+agent/utils.go
+
+This file reads configuration from command-line flags, such as the Master URL, Agent listen address, Worker image, Worker port range, Ollama URL, and Chroma URL.
+
+agent/types.go
+
+This file defines shared Agent data structures, such as AgentConfig, CreateWorkerRequest, and CreateWorkerResponse.
+
+
+
+worker/ Directory
+
+The worker/ directory contains the Python Worker service. Workers are the execution units that process user requests.
+
+The Worker is responsible for:
+
+    Running a gRPC server.
+
+    Receiving requests from the Master.
+
+    Managing a local priority queue.
+
+    Performing RAG retrieval.
+
+    Calling Ollama for inference.
+
+    Returning responses to the Master.
+
+Important files include:
+
+worker/
+
+├── main.py
+
+├── rag.py
+
+├── model.py
+
+├── Dockerfile
+
+├── requirements.txt
+
+├── worker_pb2.py
+
+├── worker_pb2_grpc.py
+
+└── README.md
+
+worker/main.py
+
+This is the Worker entry point. It starts the gRPC server and implements the Worker service methods:
+
+Method
+
+
+Purpose
+
+Ping
+
+
+Used by the Master for health checks
+
+Handle
+
+
+Processes chat requests
+
+The Handle function receives a request, retrieves RAG context, calls the LLM, and returns the answer.
+
+worker/rag.py
+
+This file implements the Worker-side retrieval logic. It connects to ChromaDB, loads documents, scores them based on the user prompt, and returns the most relevant context.
+
+worker/model.py
+
+This file implements the integration with Ollama. It builds the final prompt and sends it to Ollama through /api/generate.
+
+worker/Dockerfile
+
+This defines how the Worker container is built. It installs Python dependencies and starts the Worker using:
+
+CMD ["python", "main.py"]
+
+worker/requirements.txt
+
+This file lists Python dependencies such as:
+
+protobuf
+
+grpcio
+
+grpcio-tools
+
+requests
+
+worker_pb2.py and worker_pb2_grpc.py
+
+These are generated Python files from the Protocol Buffer definitions. They allow the Worker to implement the gRPC service.
+
+
+
+proto/ Directory
+
+The proto/ directory contains the Protocol Buffer definitions.
+
+proto/
+
+├── worker.proto
+
+├── agent.proto
+
+└── README.md
+
+worker.proto
+
+This is the most important proto file. It defines the gRPC service between the Master and Workers.
+
+It defines:
+
+service WorkerService {
+
+  rpc Handle (Request) returns (Response);
+
+  rpc Ping (PingRequest) returns (PingResponse);
+
+}
+
+It also defines message structures such as:
+
+Request
+
+Response
+
+PingRequest
+
+PingResponse
+
+The proto files are used to generate both:
+
+    Go gRPC code for the Master.
+
+    Python gRPC code for the Worker.
+
+This ensures that both sides follow the same communication contract.
+
+
+
+vector-db/ Directory
+
+The vector-db/ directory contains the ChromaDB-based retrieval database.
+
+It is responsible for storing the documents used in the RAG pipeline.
+
+Important files include:
+
+vector-db/
+
+├── Dockerfile
+
+├── docker-compose.yaml
+
+├── entrypoint.sh
+
+├── requirements.txt
+
+├── scripts/
+
+├── embedded-docs/
+
+└── chroma-data/
+
+vector-db/Dockerfile
+
+Builds the vector database container.
+
+vector-db/docker-compose.yaml
+
+Runs the ChromaDB service and exposes it on port 8000.
+
+vector-db/entrypoint.sh
+
+Initializes the database if required, runs a test query, and starts the Chroma server.
+
+vector-db/scripts/init_db.py
+
+Reads documents from embedded-docs/ and inserts them into ChromaDB.
+
+vector-db/scripts/query.py
+
+Provides a command-line tool to test document retrieval manually.
+
+vector-db/embedded-docs/
+
+Contains the knowledge documents used by the RAG system. These documents include World War II topics such as D-Day, Pearl Harbor, and the Allied Powers.
+
+vector-db/chroma-data/
+
+Stores persistent ChromaDB data.
+
+
+
+client/ Directory
+
+The client/ directory contains a client-side application for interacting with the Master.
+
+It includes Go files and a TUI interface that can send requests to the Master API.
+
+Important files include:
+
+client/
+
+├── main.go
+
+├── tui/
+
+├── go.mod
+
+└── README.md
+
+The client is separate from the Master TUI. The Master TUI is for monitoring the cluster, while the client can be used to send chat requests.
+
+
+
+docs/ Directory
+
+The docs/ directory contains documentation and architecture files.
+
+docs/
+
+├── arch.md
+
+├── requirements.md
+
+├── run-local.md
+
+└── system.excalidraw
+
+File
+
+
+Purpose
+
+arch.md
+
+
+Explains the system architecture
+
+requirements.md
+
+
+Lists system requirements
+
+run-local.md
+
+
+Explains how to run the system locally
+
+system.excalidraw
+
+
+Contains the architecture diagram
+
+
+
+
+
+Root-Level Files
+
+The root directory also contains important project files.
+
+File
+
+
+Purpose
+
+README.md
+
+
+Main project overview
+
+Makefile
+
+
+Build and code-generation commands
+
+docker-compose.yml
+
+
+Placeholder or future project-level Docker composition
+
+stress_test.sh
+
+
+Script for load/stress testing
+
+gradual_stress_test.sh
+
+
+Script for gradually increasing request load
+
+CODEBASE_ANALYSIS.md
+
+
+Additional codebase analysis documentation
+
+The Makefile includes commands for generating gRPC code:
+
+make generate-proto
+
+make generate-proto-go
+
+make generate-proto-python
+
+These commands generate the code required for Go and Python components to communicate through gRPC.
+
+
+
+Overall Code Organization
+
+The codebase follows a distributed-system structure:
+
+Directory
+
+
+System Role
+
+master/
+
+
+Central orchestrator
+
+agent/
+
+
+Machine-level manager
+
+worker/
+
+
+Request execution unit
+
+proto/
+
+
+Communication contract
+
+vector-db/
+
+
+RAG knowledge storage
+
+client/
+
+
+User-facing client
+
+docs/
+
+
+Documentation and diagrams
+
+The relationship between components can be summarized as:
+
+Client
+
+|
+
+| HTTP /chat
+
+v
+
+Master
+
+|
+
+| HTTP control requests
+
+v
+
+Agent
+
+|
+
+| Docker API
+
+v
+
+Worker Containers
+
+|
+
+| RAG + Ollama
+
+v
+
+Generated Response
+
+And for Worker execution:
+
+Master
+
+|
+
+| gRPC
+
+v
+
+Worker
+
+|
+
+| HTTP
+
+v
+
+Ollama
+
+
+
+Worker
+
+|
+
+| HTTP
+
+v
+
+ChromaDB
+
+
+
+7. Autoscaling and Resource Management
+
+Autoscaling is one of the critical capabilities of the LLM Cluster Orchestrator. The master component continuously evaluates cluster health and dynamically adjusts the number of active workers to balance cost efficiency with throughput and latency requirements.
+
+
+
+7.1 Autoscaling Problem
+
+LLM inference workloads are highly bursty. Traffic can increase by 10× within seconds—such as when many users submit prompts at once or a batch job starts—and then drop back to near zero. This makes static capacity planning inefficient. Provisioning for peak load wastes GPU and CPU resources during idle periods, while provisioning for average load leads to latency spikes, long queues, and dropped requests during traffic bursts.
+
+To address this, the system uses an autoscaler that continuously monitors key runtime signals (worker count, active requests, queue depth, latency, and error rate). Based on these signals, it adjusts the number of workers in real time. Cooldown windows are applied to prevent rapid oscillation, ensuring stable and efficient scaling behavior.
+
+7.2 Metrics Used
+
+The master polls all registered workers every heartbeat interval and aggregates the following metrics into a cluster-wide snapshot:
+
+
+
+Metric
+
+
+Source
+
+
+Why It Matters
+
+Worker count
+
+
+Worker registry in master
+
+
+Baseline — how many workers are currently HEALTHY
+
+Active requests
+
+
+In-flight tracker (inflight.go)
+
+
+Real-time load — requests currently being processed
+
+Queue depth
+
+
+Master request queue
+
+
+Backpressure indicator — requests waiting for a worker
+
+Latency (p50 / p95)
+
+
+Timing per request, aggregated
+
+
+User-experience signal — directly drives scale-up
+
+Error rate
+
+
+Failed vs total requests over sliding window
+
+
+Quality signal — high error rate may mean overloaded workers
+
+SCREENSHOT OF MASTER TUI
+
+showing live worker count, active requests, queue depth, and latency graphs
+
+7.3 Scale-Up Logic
+
+A scale-up event is triggered when any of the following thresholds are breached:
+
+    Queue depth exceeds the configured maximum queue depth threshold
+
+    p95 latency exceeds the latency SLO (e.g., 5 seconds)
+
+    Active requests per worker exceeds the concurrency ceiling
+
+    Error rate exceeds the error threshold over the sliding window
+
+
+
+When a scale-up is triggered, the master sends a spawn command to the agent. The agent starts a new worker process, which registers itself back with the master via gRPC. Until the worker completes registration and passes its first health check, it remains in the STARTING state and receives no traffic.
+
+
+
+Scale-Up Step
+
+
+Description
+
+1. Threshold breach detected
+
+
+Master evaluates metrics snapshot against thresholds
+
+2. Cooldown check
+
+
+Skipped if last scale-up was within the cooldown window
+
+3. Spawn command sent
+
+
+Master calls agent gRPC SpawnWorker RPC
+
+4. Agent starts worker
+
+
+Agent forks/starts the worker process on the local machine
+
+5. Worker registers
+
+
+Worker calls master RegisterWorker gRPC — state: STARTING
+
+6. Health check passes
+
+
+Master marks worker HEALTHY — now eligible for traffic
+
+
+
+7.4 Scale-Down Logic
+
+A scale-down event is triggered when ALL of the following conditions hold simultaneously — a more conservative check than scale-up to avoid premature removal of capacity:
+
+    Queue depth is zero (no backlog)
+
+    Active requests per worker is below the lower concurrency bound
+
+    p95 latency is comfortably below the SLO
+
+    Worker count is above the configured minimum

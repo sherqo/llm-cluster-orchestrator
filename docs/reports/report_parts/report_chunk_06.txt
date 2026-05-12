@@ -1,0 +1,598 @@
+OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "120"))
+
+By default, the Worker waits up to 120 seconds for Ollama to respond. This is important because LLM inference can take time, especially on slower machines or with larger models.
+
+
+
+Selecting the Ollama Server URL
+
+The Worker needs to know where Ollama is running. This is handled using:
+
+get_ollama_url(worker_port)
+
+The code first checks whether an explicit Ollama URL was provided:
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "").strip()
+
+If OLLAMA_URL exists, the Worker uses it directly.
+
+For example:
+
+OLLAMA_URL=http://127.0.0.1:11434
+
+This is the preferred approach when all workers share one Ollama instance.
+
+If OLLAMA_URL is not provided, the Worker falls back to a port-mapping system:
+
+WORKER_TO_OLLAMA_PORT = {
+
+    50051: 11435,
+
+    50052: 11436,
+
+    50053: 11437,
+
+}
+
+This means:
+
+Worker Port
+
+
+Ollama Port
+
+50051
+
+
+11435
+
+50052
+
+
+11436
+
+50053
+
+
+11437
+
+The function:
+
+get_ollama_port(worker_port)
+
+returns to the matching Ollama port. Then:
+
+get_ollama_url(worker_port)
+
+builds the full URL:
+
+return f"http://127.0.0.1:{get_ollama_port(worker_port)}"
+
+This allows each Worker to either share one Ollama instance or connect to a dedicated Ollama instance depending on deployment configuration.
+
+Ollama Availability Check
+
+Before the Worker starts serving requests, it checks whether Ollama is reachable.
+
+This happens in worker/main.py:
+
+ollama_url = get_ollama_url(WORKER_PORT)
+
+
+
+if not _is_ollama_alive(ollama_url):
+
+    print(f"[worker:{WORKER_PORT}] WARNING: Ollama not reachable at {ollama_url}")
+
+The helper function _is_ollama_alive(...) sends a request to:
+
+/api/tags
+
+This endpoint is used to check whether Ollama is running.
+
+response = requests.get(f"{url}/api/tags", timeout=2)
+
+If Ollama responds with HTTP status 200, the Worker considers Ollama alive.
+
+This check does not stop the Worker from starting. Instead, it prints a warning. This allows the Worker process to remain alive even if Ollama starts slightly later.
+
+
+
+Prompt Construction
+
+The prompt construction is handled by:
+
+build_prompt(prompt, context)
+
+This function decides how the final prompt should look before sending it to the model.
+
+There are two cases:
+
+    RAG context is available.
+
+    RAG context is not available.
+
+Case 1: Prompt With RAG Context
+
+If the Worker retrieved context from the RAG pipeline, the prompt is built like this:
+
+return (
+
+    f"Use this context to answer the question. Give a direct answer only.\n\n"
+
+    f"Context: {context}\n\n"
+
+    f"Question: {prompt}\n"
+
+    f"Answer:"
+
+)
+
+The final prompt has this structure:
+
+Use this context to answer the question. Give a direct answer only.
+
+Context: [retrieved documents]
+
+Use this context to answer the question. Give a direct answer only.
+
+Context: [retrieved documents]
+
+Question: [user question]
+
+Answer:
+
+This format tells the model to use the retrieved information as the main source of truth.
+
+For example, if the user asks:
+
+What happened on D-Day?
+
+and the RAG module retrieves a relevant D-Day paragraph, the final prompt may look like:
+
+Use this context to answer the question. Give a direct answer only.
+
+
+
+Context:
+
+[1] D-Day was the Allied invasion of Normandy on June 6, 1944...
+
+
+
+Question: What happened on D-Day?
+
+Answer:
+
+This improves answer grounding because the model receives relevant facts before generating the answer.
+
+
+
+Case 2: Prompt Without RAG Context
+
+If no RAG context is available, the prompt is simpler:
+
+return (
+
+    f"Answer this question directly: {prompt}\n"
+
+    f"Answer:"
+
+)
+
+The final prompt becomes:
+
+Answer this question directly: [user question]
+
+Answer:
+
+This fallback is important. It means the system can still work even if:
+
+    ChromaDB is unavailable.
+
+    No relevant documents are found.
+
+    The document collection is empty.
+
+    The RAG module fails to load documents.
+
+So, RAG improves the response when available, but the Worker does not fully depend on it.
+
+
+
+Running the Model
+
+The actual model inference happens in:
+
+run_model(prompt, context, worker_port)
+
+This function performs three main tasks:
+
+    Find the correct Ollama URL.
+
+    Builds the final prompt.
+
+    Send the prompt to Ollama.
+
+The Ollama URL is selected using:
+
+ollama_url = get_ollama_url(worker_port)
+
+The final prompt is built using:
+
+full_prompt = build_prompt(prompt, context)
+
+Then the Worker sends an HTTP POST request to Ollama:
+
+response = requests.post(
+
+    f"{ollama_url}/api/generate",
+
+    json={
+
+        "model": OLLAMA_MODEL,
+
+        "prompt": full_prompt,
+
+        "stream": False,
+
+        "options": {
+
+            "temperature": 0.2,
+
+            "num_predict": 200,
+
+        },
+
+    },
+
+    timeout=OLLAMA_TIMEOUT_SECONDS,
+
+)
+
+The endpoint used is:
+
+POST /api/generate
+
+This is Ollama’s generation endpoint.
+
+
+
+Ollama Request Parameters
+
+The request body sent to Ollama contains several important fields.
+
+{
+
+  "model": "smollm:135m",
+
+  "prompt": "final prompt",
+
+  "stream": false,
+
+  "options": {
+
+    "temperature": 0.2,
+
+    "num_predict": 200
+
+  }
+
+}
+
+    model
+
+This specifies which Ollama model should generate the answer.
+
+"model": "smollm:135m"
+
+In this project, the default model is lightweight, which helps make local inference faster.
+
+    prompt
+
+This contains the final prompt created by the Worker. It may include RAG context or may simply contain the user question.
+
+"prompt": "final prompt"
+
+    stream
+
+This is set to:
+
+"stream": false
+
+This means Ollama returns the complete answer in one response instead of streaming partial tokens. This makes the Worker implementation simpler because it waits for one complete JSON response.
+
+    temperature
+
+The temperature is set to:
+
+"temperature": 0.2
+
+A low temperature makes the output more stable and deterministic. This is useful for factual question answering because the system should avoid highly creative or random responses.
+
+    num_predict
+
+The response length is limited using:
+
+"num_predict": 200
+
+This limits the number of generated tokens. It helps reduce latency and prevents the model from producing unnecessarily long answers.
+
+
+
+Processing the Ollama Response
+
+After Ollama responds, the Worker checks for HTTP errors:
+
+response.raise_for_status()
+
+If the response is successful, the Worker extracts the generated text:
+
+return response.json().get("response", "").strip()
+
+Ollama returns the model output inside the response field. The Worker strips extra whitespace and returns the final answer to worker/main.py.
+
+Then worker/main.py wraps the result in a gRPC response:
+
+return worker_pb2.Response(
+
+    request_id=req_id,
+
+    reply=reply,
+
+    queue_length=depth,
+
+)
+
+This response is sent back to the Master.
+
+
+
+Error Handling
+
+The Worker includes error handling so that failures in Ollama do not crash the Worker process.
+
+    Connection Error
+
+If Ollama is not running or cannot be reached:
+
+except requests.exceptions.ConnectionError:
+
+    return f"Ollama not running at {ollama_url}"
+
+This returns a clear message instead of throwing an exception.
+
+    Timeout Error
+
+If Ollama takes too long to respond:
+
+except requests.exceptions.Timeout:
+
+    return f"Ollama timed out — try a smaller model"
+
+This is useful because larger models may be too slow for the available machine.
+
+    HTTP Error
+
+If Ollama responds with an error status:
+
+except requests.exceptions.HTTPError as exc:
+
+    return f"Ollama error: {exc} — {response.text}"
+
+This helps expose model-server errors during debugging.
+
+    General Error
+
+Any other unexpected error is caught using:
+
+except Exception as exc:
+
+    return f"Error: {exc}"
+
+This protects the Worker from crashing due to unexpected runtime issues.
+
+
+
+Complete Inference Flow
+
+The full inference process works as follows:
+
+1. Worker receives request from Master using gRPC
+
+
+
+2. Worker extracts the user message
+
+
+
+3. Worker retrieves RAG context, if available
+
+
+
+4. Worker calls run_model(...)
+
+
+
+5. run_model selects the Ollama URL
+
+
+
+6. build_prompt creates the final prompt
+
+
+
+7. Worker sends POST /api/generate to Ollama
+
+
+
+8. Ollama runs the configured model
+
+
+
+9. Ollama returns generated text
+
+
+
+10. Worker extracts the response field
+
+
+
+11. Worker sends the answer back to the Master through gRPC
+
+
+
+12. Master returns the answer to the client
+
+
+
+Inference Flow Diagram
+
+Master
+
+|
+
+| gRPC Request
+
+v
+
+Worker
+
+|
+
+| retrieve context
+
+v
+
+RAG Module
+
+|
+
+| context
+
+v
+
+Worker
+
+|
+
+| build_prompt(prompt, context)
+
+v
+
+Ollama
+
+|
+
+| POST /api/generate
+
+v
+
+Local LLM Model
+
+|
+
+| generated response
+
+v
+
+Ollama
+
+|
+
+| JSON response
+
+v
+
+Worker
+
+|
+
+| gRPC Response
+
+v
+
+Master
+
+
+
+Why Ollama Was Used
+
+Ollama is useful in this project because it allows the system to run LLMs locally without depending on an external cloud API. This matches the distributed cluster design because each machine can run its own local inference backend.
+
+Using Ollama provides several advantages:
+
+    The model can run locally.
+
+    The system does not require an external API key.
+
+    Workers can share one Ollama instance.
+
+    Different models can be tested by changing environment variables.
+
+    The inference backend is separated from the orchestration logic.
+
+
+
+6.9 Docker-Based Worker Deployment
+
+The system deploys each Worker as a separate Docker container. This is an important design choice because Workers are the execution units that handle LLM requests, RAG retrieval, and gRPC communication with the Master. By running Workers inside containers, the system can create, stop, and remove them dynamically without manually starting Python processes.
+
+This makes the cluster more flexible and scalable. When the system has more traffic, the Master can ask an Agent to create additional Worker containers. When the system has less traffic, unnecessary Workers can be removed.
+
+
+
+Purpose of Docker-Based Deployment
+
+Docker is used to make Worker deployment more reliable and repeatable.
+
+Instead of depending on the user to manually install Python packages and start each Worker, the Worker environment is packaged into a Docker image. Every Worker container starts from the same image and runs the same Python application.
+
+This provides several advantages:
+
+Advantage
+
+
+Explanation
+
+Isolation
+
+
+Each Worker runs in its own container
+
+Repeatability
+
+
+Every Worker starts from the same image
+
+Dynamic scaling
+
+
+Workers can be created and removed when needed
+
+Easier cleanup
+
+
+Containers can be removed by Agent commands
+
+Environment consistency
+
+
+Dependencies are installed inside the image
+
+Recovery support
+
+
+Running containers can be rediscovered after restart
+
+
+
+Worker Docker Image
+
+The Worker Docker image is defined in:
+
+worker/Dockerfile
+
+The Dockerfile uses a lightweight Python image:
+
+FROM python:3.11-slim

@@ -1,0 +1,596 @@
+10.6 Example Chat Request and Response
+
+The following end-to-end example demonstrates a complete RAG-augmented inference cycle. The client submits a factual WWII question, the worker retrieves relevant document context from the vector DB, augments the prompt, and generates a grounded response.
+
+
+
+Request Details
+
+Field
+
+
+Value
+
+User query
+
+
+What was the significance of the Battle of Stalingrad?
+
+Model
+
+
+llama-3-8b-instruct (4-bit quantized)
+
+Temperature
+
+
+0.7
+
+Max tokens
+
+
+512
+
+Request ID
+
+
+req-0147
+
+Assigned worker
+
+
+w-001
+
+
+
+RAG Retrieval
+
+Field
+
+
+Value
+
+Query sent to vector DB
+
+
+'Battle of Stalingrad significance Eastern Front'
+
+Top-k retrieved
+
+
+3 document chunks
+
+Primary source
+
+
+04-battle-of-stalingrad.md (cosine similarity: 0.91)
+
+Secondary source
+
+
+15-european-theater.md (cosine similarity: 0.78)
+
+Tertiary source
+
+
+09-major-leaders.md (cosine similarity: 0.71)
+
+Retrieval latency
+
+
+162 ms
+
+Augmented prompt tokens
+
+
+387
+
+
+
+Performance and Response
+
+Field
+
+
+Value
+
+Completion tokens
+
+
+491
+
+Inference latency
+
+
+2.34 s
+
+Total end-to-end latency
+
+
+2.50 s (incl. 162 ms retrieval)
+
+Finish reason
+
+
+stop
+
+Response excerpt
+
+
+The Battle of Stalingrad (August 1942 – February 1943) represented the decisive turning point of the Eastern Front. The encirclement and destruction of Germany's 6th Army — approximately 300,000 troops — marked the first major German defeat and permanently shifted strategic initiative to the Soviet Union. Psychologically, Stalingrad shattered the myth of German invincibility...
+
+
+
+SCREENSHOT REQUIRED: Screenshot of the full JSON response body for this request — including choices[0].message.content with the complete response text, the usage object with token counts, and the latency_ms field.
+
+Figure 10.6 — RAG-augmented response: Stalingrad query, 3 context chunks retrieved, 2.50 s total end-to-end latency
+
+
+
+End-to-End Observation
+
+Total latency of 2.50 s — including 162 ms vector retrieval, 387-token augmented prompt construction, and 491-token inference — is well within the 5 s p95 SLO. This confirms the RAG pipeline adds minimal overhead and the vector DB does not become a bottleneck under single-client load.
+
+
+
+
+
+This section illustrates how the system behaves during normal operation and under load. The examples are taken from actual runs of the system and are intended to show that the master, agent, workers, and client interact correctly across the full request lifecycle.
+
+
+
+10.1 Master TUI Screenshots
+
+The master provides a terminal‑based dashboard that displays the real‑time state of the cluster. This interface is used to monitor system health and observe autoscaling behavior.
+
+screenshots to include:
+
+    Initial startup state showing:
+
+    zero or minimal workers,
+
+    registered agent(s),
+
+    idle queue.
+
+    Active load state during a stress test showing:
+
+    increased worker count,
+
+    rising in‑flight requests,
+
+    autoscaler status changing.
+
+    Scale‑down state after load decreases showing:
+
+    workers entering DRAINING,
+
+    reduced in‑flight requests.
+
+What the screenshots demonstrate:
+
+    The master correctly tracks agents, workers, and requests.
+
+    Autoscaling decisions are visible and easy to reason about.
+
+    The TUI provides a useful operational overview rather than requiring log inspection.
+
+
+
+
+
+10.2 Agent Logs
+
+Agent logs record all worker management actions performed on a compute node.
+
+Suggested screenshots to include:
+
+    Agent startup and successful registration with the master.
+
+    Worker creation logs showing:
+
+    Docker container creation,
+
+    assigned ports,
+
+    readiness checks.
+
+    Worker removal logs during scale‑down.
+
+What the logs demonstrate:
+
+    The agent correctly acts as a bridge between the master and Docker.
+
+    Workers are not marked ready until their gRPC service is reachable.
+
+    Scale‑up and scale‑down actions translate into real container lifecycle events.
+
+
+
+10.3 Worker Logs
+
+Worker logs capture request execution and health‑check activity.
+
+Suggested screenshots to include:
+
+    A worker receiving multiple requests.
+
+    Logs showing:
+
+    request ID handling,
+
+    optional RAG retrieval,
+
+    calls to the Ollama API.
+
+    Health‑check Ping requests from the master.
+
+What the logs demonstrate:
+
+    Workers handle concurrent requests correctly.
+
+    Priority and concurrency limits are respected.
+
+    Workers remain observable and debuggable.
+
+
+
+10.4 Client Output
+
+The client is a terminal‑based chat interface that interacts only with the master.
+
+Suggested screenshots to include:
+
+    A successful chat session with a valid response.
+
+    A failure case where the system returns a clear “service unavailable” message under overload.
+
+What the output demonstrates:
+
+    End users interact with a single, stable entry point.
+
+    Errors are handled explicitly rather than silently timing out.
+
+    The system behaves predictably under load.
+
+
+
+10.5 Docker Container Output
+
+10.6 Example Chat Request and Response
+
+Example request sent to the master:
+
+JSON
+
+{
+
+"userId": "student1",
+
+"prompt": "Who were the major leaders in World War II?",
+
+"tier": "free"
+
+}
+
+Example response returned to the client:
+
+    A concise, human‑readable answer grounded in retrieved context.
+
+    Response returned within acceptable latency bounds.
+
+What this demonstrates:
+
+    Full end‑to‑end operation of routing, inference, and response handling.
+
+    Correct integration of RAG and LLM inference.
+
+    Clean separation between client, master, and worker responsibilities.
+
+
+
+11. Limitations
+
+While the system meets the project objectives, there are several limitations arising from environmental constraints and deliberate design scope decisions.
+
+
+
+11.1 Local Machine and Docker Limitations
+
+The project was developed and tested mainly in a local machine environment using Docker containers. This setup is useful for demonstrating the system architecture, worker deployment, request routing, RAG integration, and autoscaling behavior. However, it also introduces several limitations compared to running the system on a real distributed production cluster.
+
+Because the Master, Agent, Workers, ChromaDB, and Ollama may all run on the same physical machine during testing, the system does not fully represent the performance or reliability of a multi-machine deployment.
+
+
+
+Single-Machine Resource Constraints
+
+One major limitation is that all components may share the same machine resources. These resources include:
+
+CPU
+
+RAM
+
+Disk I/O
+
+Network stack
+
+Docker daemon
+
+Ollama runtime
+
+ChromaDB service
+
+In a real distributed system, Workers would usually run across multiple machines. Each machine would contribute additional CPU, memory, and possibly GPU resources. In the local setup, however, starting more Workers does not always mean adding real capacity.
+
+For example:
+
+1 Master + 1 Agent + 5 Workers
+
+may still be limited by the same local CPU, memory, and Ollama instance.
+
+This means local testing can show that the orchestration logic works, but it may not accurately represent the performance of a real cluster.
+
+
+
+Docker Overhead
+
+Docker makes Worker deployment easier and more consistent, but it also adds overhead.
+
+Each Worker container needs:
+
+    Container startup time.
+
+    Python runtime initialization.
+
+    gRPC server startup.
+
+    Environment variable setup.
+
+    Network binding.
+
+    Docker daemon management.
+
+Because of this, creating a new Worker is not instant. The Agent must create the container, start it, wait for the Worker gRPC port to become reachable, and then notify the Master through /workers/ready.
+
+This startup delay affects autoscaling. Even if the Master decides to scale up immediately, the new Worker may not be available until several seconds later.
+
+
+
+Host Networking Limitation
+
+The Worker containers use Docker host networking:
+
+NetworkMode: container.NetworkMode("host")
+
+This simplifies communication because the Worker can listen directly on the host’s port, and the Master can connect to it using:
+
+host:worker_port
+
+However, host networking has limitations:
+
+    It is less isolated than bridge networking.
+
+    Port conflicts are possible.
+
+    It may behave differently across operating systems.
+
+    It depends on the host network configuration.
+
+    It is less portable in some Docker environments.
+
+The Agent tries to reduce port conflicts by checking for available ports before creating Workers, but conflicts can still occur in edge cases if another process takes the port after the check.
+
+
+
+Port Range Limitation
+
+Workers are assigned ports from a configured range. By default, the Agent uses ports such as:
+
+50051 to 50150
+
+This means the number of Workers that can run on one Agent is limited by the available port range.
+
+If all ports in the range are used, the Agent cannot create more Workers and returns an error.
+
+This is handled in agent/docker.go by checking port availability, but it still creates a practical limit on local scaling.
+
+
+
+Shared Service Bottlenecks
+
+In the local setup, multiple Workers may share the same supporting services, especially:
+
+Ollama
+
+ChromaDB
+
+Docker daemon
+
+This creates possible bottlenecks.
+
+For example, even if the system creates several Worker containers, they may all call the same Ollama server through:
+
+OLLAMA_URL
+
+If Ollama is running only one model instance, then all Worker requests may still be bottlenecked by that shared inference backend.
+
+Similarly, ChromaDB may become a shared retrieval bottleneck if many Workers query it at the same time.
+
+Therefore, increasing Worker count does not always result in proportional performance improvement.
+
+
+
+Limited Fault Isolation
+
+Docker gives some isolation between Worker processes, but in a local setup the components still share the same physical machine.
+
+If the machine runs out of memory, experiences high CPU usage, or the Docker daemon fails, many components may be affected at the same time.
+
+For example:
+
+    The Master may become slow.
+
+    The Agent may fail to create Workers.
+
+    Existing Workers may become unresponsive.
+
+    ChromaDB may fail.
+
+    Ollama may time out.
+
+In a true distributed deployment, a failure on one machine would not necessarily affect the entire cluster. In the local setup, one machine failure can affect everything.
+
+
+
+Docker Daemon Dependency
+
+The Agent depends on the local Docker daemon to create and remove Worker containers. If Docker is not installed, not running, or unavailable, Worker deployment fails.
+
+This means the system requires:
+
+Docker installed
+
+Docker daemon running
+
+Permission to access Docker
+
+Worker image built locally
+
+If any of these requirements are missing, the Agent cannot create Workers.
+
+The Worker image must also exist locally under the configured name, such as:
+
+llm-worker:latest
+
+If the image is not built before running the Agent, Worker creation will fail.
+
+
+
+Startup Order Dependency
+
+The local system has several services that must be available in the correct order.
+
+For example:
+
+    ChromaDB should be running before Workers need RAG retrieval.
+
+    Ollama should be running before Workers perform inference.
+
+    The Agent must register with the Master before the Master can request Workers.
+
+    Workers must become ready before the Master can route traffic to them.
+
+The Agent tries to handle this by starting Ollama and ChromaDB during startup. However, startup delays can still happen, especially when Docker Compose or Ollama takes time to become ready.
+
+
+
+
+
+Difference From Real Cluster Deployment
+
+The local Docker-based setup is useful for development and demonstration, but it differs from a real cluster in several ways.
+
+Local Setup
+
+
+Real Cluster
+
+Components may run on one machine
+
+
+Components run across multiple machines
+
+Workers share local resources
+
+
+Workers may have dedicated resources
+
+Host networking is used
+
+
+Cluster networking or service discovery may be used
+
+Docker daemon is local
+
+
+Container orchestration may use Kubernetes or similar
+
+Manual image building may be required
+
+
+Images are usually stored in a registry
+
+Scaling is limited by local hardware
+
+
+Scaling depends on cluster capacity
+
+Failures affect many components
+
+
+Failures can be isolated per node
+
+Because of this, the local setup should be viewed as a functional prototype rather than a full production deployment.
+
+    All components run on a single local machine.
+
+    CPU, memory, and Docker overhead limit realistic scaling experiments.
+
+    Worker startup latency is higher than would be expected in a tuned production environment.
+
+
+
+11.2 GPU Simulation Limitations
+
+The project was designed as a distributed LLM cluster orchestrator, but the current implementation has limitations related to GPU simulation and GPU resource management. Since the system was tested mainly in a local or limited environment, the GPU behavior is not fully equivalent to a real production GPU cluster.
+
+In the current implementation, Workers are deployed as Docker containers and run local LLM inference through Ollama. However, the system does not directly manage or schedule real GPU resources. The Agent can create and remove Worker containers, but it does not yet check GPU availability, GPU memory usage, or GPU utilization before deciding where to place a Worker.
+
+
+
+No Real GPU Scheduling
+
+A major limitation is that the current Agent does not include GPU-aware scheduling. In agent/handlers.go, the /system/info endpoint reports basic machine information such as CPU usage, memory usage, and operating system information. However, it does not report GPU statistics.
+
+The current system reports values such as:
+
+    CPU usage
+
+    Memory usage
+
+    Operating system
+
+    But it does not report:
+
+    GPU utilization
+
+    GPU memory usage
+
+    Available VRAM
+
+    CUDA device count
+
+    GPU temperature
+
+    GPU process allocation
+
+Because of this, the Master cannot make placement decisions based on GPU availability. For example, if two Agents are registered, the Master can choose an Agent based on Worker count, but not based on which Agent has more free GPU memory.
+
+
+
+Simulation Does Not Fully Represent Real GPU Behavior
+
+If GPU behavior is simulated during testing, the simulation is limited because it cannot fully reproduce the behavior of real LLM inference on GPU hardware.
+
+Real GPU workloads are affected by many factors, such as:
+
+    Model size.
+
+    Available VRAM.
+
+    Number of concurrent requests.
+
+    Batch size.
+
+    Token generation speed.

@@ -1,0 +1,1 @@
+People greet each other with hello, hi, good morning, or how are you. It's polite to respond with a similar greeting.

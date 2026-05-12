@@ -1,0 +1,1 @@
+Shopping involves asking for recommendations, comparing prices, and discussing where to buy things.

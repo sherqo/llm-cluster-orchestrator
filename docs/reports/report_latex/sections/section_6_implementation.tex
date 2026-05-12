@@ -1,0 +1,97 @@
+\section{Implementation Details}
+
+\subsection{Technology Stack}
+\begin{table}[H]
+  \centering
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabularx}{\textwidth}{@{}l l X@{}}
+    \toprule
+    \textbf{Layer} & \textbf{Technology} & \textbf{Reason} \\
+    \midrule
+    Master & Go & Strong concurrency model, simple HTTP server, good gRPC support. \\
+    Worker & Python & Convenient model/RAG integration and fast prototyping. \\
+    Internal RPC & gRPC / Protocol Buffers & Typed, efficient, persistent communication for the hot path. \\
+    Inference & Ollama & Local LLM runtime with HTTP API and model selection through environment variables. \\
+    RAG & ChromaDB & Vector database service for storing and retrieving document chunks. \\
+    Deployment & Docker & Workers can be created, labeled, restarted, and removed by agents. \\
+    Monitoring & Bubble Tea TUI and metrics collector & Live view of cluster behavior and autoscaler decisions. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Master Node Implementation}
+The Master node is the central coordinator of the entire system. It is implemented in Go and is responsible for receiving client requests, selecting workers, forwarding requests to workers, tracking request state, monitoring worker health, and managing autoscaling.
+
+The Master starts from master/main.go. In this file, the system creates a router using:
+
+\begin{lstlisting}[language=Go]
+router := lib.NewRouter()
+\end{lstlisting}
+
+The router is the main in-memory structure that stores the current cluster state. After creating the router, the Master starts the HTTP server using:
+
+\begin{lstlisting}[language=Go]
+go lib.Serve(router)
+\end{lstlisting}
+
+Then it starts the terminal dashboard using:
+
+\begin{lstlisting}[language=Go]
+tui.Run(router)
+\end{lstlisting}
+
+This means the Master runs two major parts at the same time: the HTTP server that receives API requests, and the TUI dashboard that shows live cluster status.
+
+The main HTTP server implementation is in master/lib/server.go. The Master exposes endpoints such as /chat, /agents/register, and /workers/ready.
+
+The most important endpoint is /chat. When a client sends a chat request, the Master performs the following steps:
+\begin{itemize}[leftmargin=1.5em]
+  \item Validates that the request method is POST.
+  \item Parses the JSON request body into a ChatRequest.
+  \item Records the request in the metrics collector.
+  \item Applies admission control to avoid accepting too many requests during overload.
+  \item Generates a unique request ID using UUID.
+  \item Sends the request to the router.
+  \item Returns the worker response to the client.
+\end{itemize}
+
+The request format is represented by this Go struct:
+
+\begin{lstlisting}[language=Go]
+type ChatRequest struct {
+    UserID string `json:"userId"`
+    Prompt string `json:"prompt"`
+    Tier   string `json:"tier"`
+}
+\end{lstlisting}
+
+The response is represented as:
+
+\begin{lstlisting}[language=Go]
+type ChatResponse struct {
+    RequestID string `json:"requestId"`
+    Reply     string `json:"reply"`
+}
+\end{lstlisting}
+
+The actual routing happens in master/lib/router.go. The router stores workers in a map:
+
+\begin{lstlisting}[language=Go]
+workers map[string]*Worker
+\end{lstlisting}
+
+It also stores registered agents:
+
+\begin{lstlisting}[language=Go]
+agents map[string]*AgentInfo
+\end{lstlisting}
+
+This allows the Master to know which workers are available and which agent owns each worker.
+
+The Master supports multiple worker selection strategies. In master/lib/strategy.go, three strategies are defined:
+
+\begin{lstlisting}[language=Go]
+StrategyRoundRobin
+StrategyLeastConnections
+StrategyRandom
+\end{lstlisting}

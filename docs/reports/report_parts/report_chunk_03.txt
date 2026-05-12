@@ -1,0 +1,598 @@
+The default strategy is least connections. This means the Master chooses the healthy worker with the lowest number of active requests. This is useful because LLM requests can take different amounts of time, so simply rotating requests evenly may overload one worker while another is idle.
+
+The Master also tracks in-flight requests. Before sending a request to a worker, it adds the request to the in-flight store:
+
+r.AddInFlight(requestID, worker.addr)
+
+After the worker finishes, the request is removed:
+
+r.RemoveInFlight(requestID)
+
+This allows the dashboard to show which requests are currently being processed and how long they have been running.
+
+The Master also runs a health check loop. Every five seconds, it pings workers using gRPC. If a worker responds successfully, it stays healthy. If it fails, the worker is marked as draining, which means it should no longer receive new requests.
+
+
+
+6.3 Agent Implementation
+
+The Agent is responsible for managing resources on a specific machine. It acts as the bridge between the Master and the local environment where workers run.
+
+The Agent is implemented in Go. Its entry point is agent/server.go. When the Agent starts, it performs several setup steps:
+
+    Reads configuration from command-line flags.
+
+    Starts or verifies Ollama.
+
+    Starts or verifies ChromaDB.
+
+    Creates a Docker Manager.
+
+    Registers HTTP endpoints.
+
+    Registers itself with the Master.
+
+    Registers itself with the Master.
+
+The Agent configuration is defined in agent/types.go:
+
+type AgentConfig struct {
+
+    MasterURL       string
+
+    ListenAddr      string
+
+    AdvertiseHost   string
+
+    AdvertisePort   int
+
+    AgentID         string
+
+    WorkerImage     string
+
+    WorkerPortStart int
+
+    WorkerPortEnd   int
+
+    OllamaURL       string
+
+    ChromaURL       string
+
+}
+
+The configuration is loaded in agent/utils.go. The Agent requires the Master URL so it can register with the Master. It also detects the machine’s advertising host if it is not provided manually.
+
+The Agent exposes several HTTP endpoints:
+
+Endpoint
+
+
+Method
+
+
+Purpose
+
+/system/info
+
+
+GET
+
+
+Returns CPU, memory, and OS information
+
+/workers/create
+
+
+POST
+
+
+Creates a new worker Docker container
+
+/workers/destroy
+
+
+DELETE
+
+
+Destroys a specific worker container
+
+/workers/clean
+
+
+POST
+
+
+Removes all worker containers created from the configured image
+
+
+
+When the Agent starts, it calls RegisterWithMaster(...) in agent/handlers.go. This sends the Agent’s ID, host, port, and existing running workers to the Master.
+
+This is important for recovery. If the Agent restarts while workers are still running, it can report those surviving workers back to the Master. The Master can then re-adopt them instead of creating unnecessary new workers.
+
+The Agent also manages local services. In agent/ollama.go, it checks whether Ollama is already running by calling:
+
+/api/tags
+
+If Ollama is not running, the Agent starts it using:
+
+ollama serve
+
+Similarly, in agent/chroma.go, the Agent checks whether ChromaDB is alive using:
+
+/api/v1/heartbeat
+
+If ChromaDB is not running, the Agent starts it using Docker Compose from the vector-db directory.
+
+
+
+6.4 Worker Implementation
+
+The Worker is the component that processes user requests. It is implemented in Python and located in the /worker directory.
+
+The main worker file is worker/main.py. Each worker runs a gRPC server and listens for requests from the Master. The worker implements the WorkerService defined in proto/worker.proto.
+
+The worker provides two main gRPC methods:
+
+Method
+
+
+Purpose
+
+Ping
+
+
+Used by the Master to check if the worker is alive
+
+Handle
+
+
+Used to process chat requests
+
+The Ping method simply returns:
+
+worker_pb2.PingResponse(status="ok")
+
+The Handle method performs the actual work. When a request arrives, the worker receives:
+
+    request_id
+
+    message
+
+    priority
+
+The worker stores requests in an in-memory priority queue implemented using Python’s heapq. This is intended to allow higher-priority requests, such as Pro users, to be handled before lower-priority Free users.
+
+The general worker flow is:
+
+    Receive gRPC request from Master.
+
+    Determine request priority.
+
+    Add request to priority queue.
+
+    Pop the highest-priority request.
+
+    Retrieve relevant context using RAG.
+
+    Send the prompt and context to Ollama.
+
+    Return the generated response to the Master.
+
+The RAG retrieval is done using:
+
+rag_context = retrieve(message)
+
+The LLM inference is done using:
+
+reply = run_model(prompt=message, context=rag_context, worker_port=WORKER_PORT)
+
+Finally, the worker returns:
+
+worker_pb2.Response(
+
+    request_id=req_id,
+
+    reply=reply,
+
+    queue_length=depth,
+
+)
+
+This means each worker is not just a simple model server. It includes request prioritization, RAG retrieval, model inference, and queue-depth reporting.
+
+
+
+6.5 gRPC Communication
+
+gRPC is used for communication between the Master and Workers. The gRPC contract is defined in proto/worker.proto.
+
+The service definition is:
+
+service WorkerService {
+
+  rpc Handle (Request) returns (Response);
+
+  rpc Ping (PingRequest) returns (PingResponse);
+
+}
+
+The Handle RPC is used for normal chat processing. The Ping RPC is used for health checks.
+
+The request message is:
+
+
+
+
+
+message Request {
+
+  string request_id = 1;
+
+  string message = 2;
+
+  int32 priority = 3;
+
+}
+
+The response message is:
+
+message Response {
+
+  string request_id = 1;
+
+  string reply = 2;
+
+  int32 queue_length = 3;
+
+  int32 retries = 4;
+
+}
+
+On the Master side, Go gRPC code is generated inside master/generated/. The Master creates a gRPC connection to each worker in master/lib/worker.go using:
+
+grpc.DialContext(...)
+
+The connection uses keepalive settings so the Master can maintain a long-lived connection with workers.
+
+When the Master sends a request to a worker, it calls:
+
+w.client.Handle(ctx, &pb.Request{
+
+    RequestId: requestID,
+
+    Message:   req.Prompt,
+
+    Priority:  tierToPriority(req.Tier),
+
+})
+
+When the Master checks worker health, it calls:
+
+w.client.Ping(ctx, &pb.PingRequest{})
+
+On the Worker side, Python generated files worker_pb2.py and worker_pb2_grpc.py are used. The worker registers itself as a gRPC server using:
+
+worker_pb2_grpc.add_WorkerServiceServicer_to_server(worker, server)
+
+This design separates the external HTTP API from the internal high-performance worker communication layer.
+
+
+
+6.6 HTTP API Endpoints
+
+HTTP is used for control-plane communication in the system. Control-plane communication means the requests that manage the cluster itself, such as registering agents, creating workers, notifying the Master that a worker is ready, and receiving user chat requests.
+
+The system uses HTTP mainly in two places:
+
+    Client to Master: the client sends chat requests to the Master.
+
+    Master to Agent: the Master asks Agents to create or manage workers.
+
+    Agent to Master: the Agent registers itself and notifies the Master when workers become ready.
+
+The actual LLM task execution between the Master and Workers is not done through HTTP. That part uses gRPC. HTTP is used for coordination and management.
+
+
+
+6.6.1. Master HTTP Endpoints
+
+The Master HTTP endpoints are implemented in:
+
+master/lib/server.go
+
+The Master listens on port 8080:
+
+http.ListenAndServe(":8080", nil)
+
+The Master exposes three main HTTP endpoints:
+
+Endpoint
+
+
+Method
+
+
+Purpose
+
+/chat
+
+
+POST
+
+
+Receives user prompts and returns model replies
+
+/agents/register
+
+
+POST
+
+
+Registers an Agent with the Master
+
+/workers/ready
+
+
+POST
+
+
+Receives notification that a new Worker is ready
+
+
+
+/chat Endpoint
+
+The /chat endpoint is the main endpoint used by clients. It receives a user prompt, assigns it a request ID, forwards it to a suitable Worker, and returns the generated response.
+
+
+
+
+
+Purpose
+
+This endpoint acts as the external entry point of the LLM cluster. Instead of the client communicating directly with Workers, the client only communicates with the Master. The Master then decides which Worker should process the request.
+
+Request Method
+
+POST /chat
+
+Request Body
+
+The request body is decoded into the ChatRequest struct:
+
+type ChatRequest struct {
+
+    UserID string `json:"userId"`
+
+    Prompt string `json:"prompt"`
+
+    Tier   string `json:"tier"`
+
+}
+
+Example request:
+
+{
+
+  "userId": "user-1",
+
+  "prompt": "What happened on D-Day?",
+
+  "tier": "pro"
+
+}
+
+Field Explanation
+
+Field
+
+
+Description
+
+userId
+
+
+Identifies the user sending the request
+
+prompt
+
+
+The actual question or message sent by the user
+
+tier
+
+
+Represents the user type, such as pro or free
+
+The tier field is important because it can be converted into a priority value before sending the request to a Worker. In the Master code, pro users are intended to receive higher priority than free users.
+
+Internal Flow
+
+When /chat receives a request, the Master performs these steps:
+
+    Checks that the HTTP method is POST.
+
+    Decodes the JSON request body.
+
+    Records the request in the metrics system.
+
+    Admission control is applied to avoid overload.
+
+    Generates a unique request ID using UUID.
+
+    Call the router to process the request.
+
+    Returns the Worker response to the client.
+
+In the code, the request ID is generated using:
+
+requestID, err := uuid.NewV7()
+
+Then the Master calls:
+
+resp, err := router.HandleChat(r.Context(), requestIDStr, req)
+
+This passes the request to the routing layer, which selects a Worker and sends the task using gRPC.
+
+Response Body
+
+The response is encoded using the ChatResponse struct:
+
+type ChatResponse struct {
+
+    RequestID string `json:"requestId"`
+
+    Reply     string `json:"reply"`
+
+}
+
+Example response:
+
+{
+
+  "requestId": "generated-uuid",
+
+  "reply": "Generated answer from the worker"
+
+}
+
+Error Handling
+
+The /chat endpoint handles several failure cases:
+
+Error Case
+
+
+HTTP Status
+
+
+Meaning
+
+Invalid method
+
+
+405 Method Not Allowed
+
+
+The request was not sent as POST
+
+Invalid JSON
+
+
+400 Bad Request
+
+
+The request body could not be decoded
+
+Admission queue full
+
+
+503 Service Unavailable
+
+
+The system is overloaded
+
+Admission timeout
+
+
+504 Gateway Timeout
+
+
+The request waited too long in the queue
+
+No workers available
+
+
+503 Service Unavailable
+
+
+The Master has no healthy Worker to use
+
+Worker failed
+
+
+502 Bad Gateway
+
+
+The selected Worker failed while processing
+
+Internal error
+
+
+500 Internal Server Error
+
+
+Unexpected server-side error
+
+This makes the endpoint more reliable because the client receives meaningful HTTP status codes depending on what went wrong.
+
+
+
+/agents/register Endpoint
+
+The /agents/register endpoint is used when an Agent starts and wants to join the cluster.
+
+Purpose
+
+An Agent represents a machine that can host Worker containers. Before the Master can ask an Agent to create Workers, the Agent must register itself with the Master.
+
+Request Method
+
+POST /agents/register
+
+Request Body
+
+The Master expects an AgentRegisterRequest:
+
+type AgentRegisterRequest struct {
+
+    AgentID string              `json:"agent_id"`
+
+    Host    string              `json:"host"`
+
+    Port    int                 `json:"port"`
+
+    Workers []RunningWorkerInfo `json:"workers,omitempty"`
+
+}
+
+Example request:
+
+{
+
+  "agent_id": "agent-192.168.1.10-9000",
+
+  "host": "192.168.1.10",
+
+  "port": 9000,
+
+  "workers": [
+
+    {
+
+      "worker_id": "worker-agent-192.168.1.10-50051",
+
+      "address": "192.168.1.10:50051",
+
+      "container_id": "abc123"
+
+    }
+
+  ]
+
+}
+
+Field Explanation
+
+Field
+
+
+Description
+
+agent_id
+
+
+Unique ID of the Agent
+
+host

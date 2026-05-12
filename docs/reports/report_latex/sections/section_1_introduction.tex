@@ -1,0 +1,23 @@
+\section{Introduction}
+
+\subsection{Project Background}
+Modern LLM applications are often used by many users at the same time. Unlike a normal database lookup or static API call, an LLM request may take seconds because the system must prepare the prompt, optionally retrieve context, call a model runtime, and stream or return generated text. If all requests are sent to one server, the system becomes slow and fragile. Distributed computing addresses this by dividing the workload across multiple nodes and coordinating them through a controller.
+
+This project applies distributed-computing concepts to an LLM inference service. The system behaves like a small cluster: clients send chat requests to a master, the master routes each request to a worker, workers perform RAG and model inference, and agents help the master create or remove workers on available machines.
+
+\subsection{Problem Statement}
+The main problem is to serve 1000+ concurrent LLM requests with acceptable response time, controlled resource usage, and graceful behavior when workers are overloaded or unavailable. The system must distribute requests instead of letting one machine become the single computation point. It also needs a way to observe cluster load, add capacity when demand rises, and remove capacity when the system is idle.
+
+\subsection{Project Objectives}
+\begin{itemize}[leftmargin=1.5em]
+  \item Design a distributed architecture for high-concurrency LLM inference.
+  \item Implement a master/load balancer capable of routing requests to multiple workers.
+  \item Use gRPC for the internal hot path between the master and workers.
+  \item Integrate RAG so answers can be grounded in an external knowledge base.
+  \item Track active requests, latency, throughput, errors, and worker state.
+  \item Support autoscaling through agents that can spawn or terminate worker containers.
+  \item Evaluate the design using stress tests, failure simulation, and metrics.
+\end{itemize}
+
+\subsection{Scope of the Project}
+The submitted implementation focuses on a working local/distributed prototype. It demonstrates request routing, worker registration, agent registration, worker creation through Docker, Chroma-based retrieval, Ollama-based generation, metrics collection, admission control, and autoscaling logic. It is not a fully production-hardened cloud platform, but it provides the core construction details needed to reason about such a platform.

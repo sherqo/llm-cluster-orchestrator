@@ -1,0 +1,600 @@
+This means each Worker container runs on Python 3.11 but avoids unnecessary operating system packages, keeping the image smaller.
+
+The working directory inside the container is set to:
+
+WORKDIR /app
+
+Then the dependency file is copied:
+
+COPY requirements.txt .
+
+The dependencies are installed using:
+
+RUN pip install --no-cache-dir --retries 5 --timeout 120 -r requirements.txt
+
+The --no-cache-dir option reduces image size by avoiding pip cache files. The retry and timeout options make dependency installation more tolerant of temporary network delays during image build.
+
+The Dockerfile also sets:
+
+ENV PYTHONUNBUFFERED=1
+
+This ensures Python logs are printed immediately instead of being buffered. This is useful for debugging Worker containers because logs appear in real time.
+
+Finally, the Worker source code is copied:
+
+COPY . .
+
+The container starts the Worker using:
+
+CMD ["python", "main.py"]
+
+This means when the container starts, it runs worker/main.py, which starts the gRPC Worker server.
+
+
+
+Agent Responsibility in Worker Deployment
+
+The Agent is responsible for creating and managing Worker containers. This logic is implemented in:
+
+agent/docker.go
+
+The Agent uses the Docker Go SDK to communicate with the local Docker daemon. This is done in NewDockerManager(...):
+
+client.NewClientWithOpts(
+
+    client.FromEnv,
+
+    client.WithAPIVersionNegotiation(),
+
+)
+
+This allows the Agent to create, start, list, and remove Docker containers programmatically.
+
+The Agent creates Workers through:
+
+CreateWorker(req)
+
+This function is called when the Master sends a request to the Agent’s /workers/create endpoint.
+
+
+
+Worker Creation Flow
+
+When the Master needs a new Worker, the deployment process follows this flow:
+
+Master
+
+|
+
+| POST /workers/create
+
+v
+
+Agent
+
+|
+
+| CreateWorker(req)
+
+v
+
+Docker
+
+|
+
+| Start Worker container
+
+v
+
+Worker
+
+|
+
+| Start Python gRPC server
+
+v
+
+Agent
+
+|
+
+| Wait until Worker port is reachable
+
+v
+
+Master
+
+|
+
+| Register Worker through /workers/ready
+
+In more detail, the Agent performs these steps:
+
+    Receives a create request from the Master.
+
+    Selects the configured Worker image.
+
+    Finds an available host port.
+
+    Generates a unique Worker ID.
+
+    Builds the Worker container name.
+
+    Prepares environment variables.
+
+    Creates the Docker container.
+
+    Starts the Docker container.
+
+    Returns the Worker ID and address.
+
+    Waits for the Worker gRPC port to become reachable.
+
+    Sends a readiness callback to the Master.
+
+
+
+Port Allocation
+
+Each Worker runs a gRPC server and needs a port. The Agent manages a range of possible Worker ports.
+
+The port range is configured in AgentConfig:
+
+WorkerPortStart int
+
+WorkerPortEnd   int
+
+By default, these are loaded from command-line flags in agent/utils.go:
+
+flag.IntVar(&cfg.WorkerPortStart, "worker-port-start", 50051, "first host port to publish worker gRPC")
+
+flag.IntVar(&cfg.WorkerPortEnd, "worker-port-end", 50150, "last host port to publish worker gRPC")
+
+So, by default, the Agent can create Workers using ports from:
+
+50051 to 50150
+
+The Agent chooses a free port using:
+
+allocateHostPort()
+
+This function loops through the configured range and checks whether each port is available.
+
+The check is done using:
+
+net.Listen("tcp", fmt.Sprintf(":%d", port))
+
+If the port can be opened, it is considered available. The Agent then closes it and assigns it to the new Worker.
+
+This prevents two Workers from trying to use the same gRPC port.
+
+
+
+Worker ID and Container Name
+
+After selecting a port, the Agent generates a unique Worker ID:
+
+workerID := fmt.Sprintf(
+
+    "worker-%s-%d-%d",
+
+    d.cfg.AgentID,
+
+    hostPort,
+
+    time.Now().UnixMilli(),
+
+)
+
+This ID contains:
+
+    The Agent ID.
+
+    The assigned Worker port.
+
+    A timestamp in milliseconds.
+
+This makes Worker IDs unique even when multiple Workers are created by the same Agent.
+
+The Docker container name is then created as:
+
+name := "llm-" + workerID
+
+For example, a Worker container name may look like:
+
+llm-worker-agent-192.168.1.10-9000-50051-1710000000000
+
+This naming convention helps identify which containers belong to the LLM cluster.
+
+
+
+Environment Variables Passed to Workers
+
+The Agent passes configuration to each Worker through environment variables.
+
+In agent/docker.go, the environment list is built like this:
+
+env := append([]string{}, req.Env...)
+
+env = append(
+
+    env,
+
+    "WORKER_ID="+workerID,
+
+    fmt.Sprintf("WORKER_PORT=%d", hostPort),
+
+    "MASTER_URL="+d.cfg.MasterURL,
+
+)
+
+If Ollama and Chroma URLs are configured, they are also added:
+
+if d.cfg.OllamaURL != "" {
+
+    env = append(env, "OLLAMA_URL="+d.cfg.OllamaURL)
+
+}
+
+
+
+if d.cfg.ChromaURL != "" {
+
+    env = append(env, "CHROMA_URL="+d.cfg.ChromaURL)
+
+}
+
+The main environment variables are:
+
+Variable
+
+
+Purpose
+
+WORKER_ID
+
+
+Unique ID of the Worker
+
+WORKER_PORT
+
+
+Port where the Worker gRPC server should listen
+
+MASTER_URL
+
+
+URL of the Master
+
+OLLAMA_URL
+
+
+URL of the local/shared Ollama server
+
+CHROMA_URL
+
+
+URL of the ChromaDB vector database
+
+Inside worker/main.py, the Worker reads its port using:
+
+worker_port_env = os.getenv("WORKER_PORT")
+
+If WORKER_PORT exists, it uses that value. Otherwise, it falls back to a command-line argument or default port 50051.
+
+This allows the same Docker image to run many Worker containers on different ports.
+
+
+
+Docker Container Creation
+
+The Agent creates the Docker container using:
+
+d.client.ContainerCreate(...)
+
+The container config includes:
+
+&container.Config{
+
+    Image: image,
+
+    Env:   env,
+
+    Labels: map[string]string{
+
+        "llm.cluster.role":      "worker",
+
+        "llm.cluster.agent_id":  d.cfg.AgentID,
+
+        "llm.cluster.worker_id": workerID,
+
+        "llm.cluster.host_port": strconv.Itoa(hostPort),
+
+    },
+
+}
+
+This tells Docker:
+
+    Which image to use.
+
+    Which environment variables to pass.
+
+    Which labels to attach to the container.
+
+After the container is created, it is started using:
+
+d.client.ContainerStart(...)
+
+If the container fails to start, the Agent removes it immediately:
+
+ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+
+This prevents failed containers from being left behind.
+
+
+
+Host Networking
+
+The Worker container is started with host networking:
+
+NetworkMode: container.NetworkMode("host")
+
+This means the Worker container shares the host machine’s network stack. If the Worker listens on port 50051, it is reachable directly at:
+
+host-ip:50051
+
+This is important because the Master needs to connect to the Worker using gRPC. Host networking avoids extra Docker port-mapping complexity.
+
+For example, if the Agent advertises host:
+
+192.168.1.10
+
+and the Worker uses port:
+
+50051
+
+then the Worker address becomes:
+
+192.168.1.10:50051
+
+The Agent returns this address to the Master.
+
+
+
+Worker Address Returned to the Master
+
+After the container starts successfully, the Agent returns a CreateWorkerResponse:
+
+return CreateWorkerResponse{
+
+    WorkerID:    workerID,
+
+    Address:     fmt.Sprintf("%s:%d", d.cfg.AdvertiseHost, hostPort),
+
+    HostPort:    hostPort,
+
+    ContainerID: resp.ID,
+
+}
+
+This response includes:
+
+Field
+
+
+Description
+
+WorkerID
+
+
+Unique Worker identifier
+
+Address
+
+
+Network address used by the Master to connect to the Worker
+
+HostPort
+
+
+The port assigned to the Worker
+
+ContainerID
+
+
+Docker container ID
+
+The Master uses the Worker address to create a gRPC client connection.
+
+
+
+
+
+Asynchronous Worker Readiness
+
+Starting a container does not guarantee that the Worker is immediately ready. The container may be running, but the Python gRPC server may still be loading.
+
+To handle this, the Agent waits until the Worker port is reachable before notifying the Master.
+
+This logic is in agent/handlers.go:
+
+go waitAndCallback(resp, callbackURL, agentID)
+
+The Agent checks the Worker port using:
+
+waitForPort(resp.Address, 100*time.Second)
+
+This repeatedly tries to open a TCP connection to the Worker address.
+
+If the port becomes reachable, the Agent sends a callback to the Master:
+
+POST /workers/ready
+
+The callback body contains:
+
+{
+
+  "worker_id": "worker-id",
+
+  "address": "host:port",
+
+  "agent_id": "agent-id",
+
+  "container_id": "container-id"
+
+}
+
+Only after this callback does the Master register the Worker as available.
+
+This design avoids routing requests to Workers before they are ready.
+
+
+
+Container Labels and Recovery
+
+The Agent labels every Worker container with metadata:
+
+"llm.cluster.role": "worker"
+
+"llm.cluster.agent_id": d.cfg.AgentID
+
+"llm.cluster.worker_id": workerID
+
+"llm.cluster.host_port": strconv.Itoa(hostPort)
+
+These labels are very useful for recovery.
+
+When the Agent restarts, it can list all Docker containers and identify which ones belong to the cluster. This is implemented in:
+
+ListRunningWorkers()
+
+The Agent checks:
+
+    The container image matches the Worker image.
+
+    The label llm.cluster.role is worker.
+
+    The container state is running.
+
+    The Worker ID and host port labels exist.
+
+Then it rebuilds the Worker information and sends it to the Master during registration.
+
+This allows the Master to re-adopt running Workers instead of losing track of them after an Agent restart.
+
+Worker Cleanup and Removal
+
+The Agent also supports Worker removal.
+
+    Remove One Worker
+
+The /workers/destroy endpoint removes a specific Worker. It calls:
+
+DestroyWorker(workerID)
+
+The Agent finds the container by name:
+
+name := "llm-" + workerID
+
+Then it removes the container:
+
+ContainerRemove(ctx, name, container.RemoveOptions{Force: true})
+
+This is used when the Master wants to remove a Worker, such as during scale-down.
+
+    Clean All Workers
+
+The /workers/clean endpoint removes all containers using the configured Worker image. This is implemented in:
+
+CleanWorkers()
+
+It lists all containers and removes the ones whose image matches the Worker image.
+
+This is useful for testing and resetting the environment.
+
+
+
+    Relationship With Autoscaling
+
+Docker-based deployment is directly connected to autoscaling.
+
+The Master’s autoscaler monitors cluster metrics such as:
+
+    Worker utilization
+
+    Queue depth
+
+    P95 latency
+
+    Requests per second
+
+    Number of healthy Workers
+
+When the Master decides that more capacity is needed, it selects an Agent and sends:
+
+POST /workers/create
+
+The Agent then creates a new Docker Worker container.
+
+When the system is under low load, the Master can mark Workers as draining and remove them after their active requests finish.
+
+So, Docker gives the system the ability to scale horizontally by adding and removing Worker containers at runtime.
+
+
+
+6.10 Monitoring and TUI Dashboard
+
+The project includes a real-time terminal-based monitoring dashboard for the Master node. This dashboard is used to observe the current state of the cluster while the system is running. It is implemented using Bubble Tea and Lip Gloss, which are Go libraries for building interactive terminal user interfaces.
+
+The dashboard starts from the Master entry point in:
+
+master/main.go
+
+The Master launches the dashboard using:
+
+tui.Run(router)
+
+This is important because the dashboard receives the same Router object used by the Master server. Therefore, the dashboard can read live cluster information directly from the Master’s in-memory state.
+
+The TUI implementation is in:
+
+master/tui/
+
+
+
+Screenshot: Master TUI Dashboard
+
+[screenshot of the Master TUI dashboard here]
+
+Figure 6.1: Master TUI dashboard showing real-time cluster state, Workers, Agents, requests, logs, metrics, and autoscaling information.
+
+
+
+Purpose of the TUI Dashboard
+
+The monitoring dashboard is designed to make the distributed system easier to understand, debug, and operate. Since the system contains multiple components, such as the Master, Agents, Workers, Docker containers, ChromaDB, and Ollama, it is important to have one place where the system state can be observed.
+
+The dashboard helps the user monitor:
+
+    How many Workers are available.
+
+    Which Workers are healthy or unavailable.
+
+    Which Agent owns each Worker.
+
+    Which requests are currently being processed.
+
+    How long have recent requests took to complete.
+
+    Whether the autoscaler is planning to scale up or scale down.
+
+    What errors, warnings, or important events occurred recently.
+
+    Which routing strategy is currently being used.
+
+Without this dashboard, the user would need to inspect logs, Docker containers, and program output manually. The TUI combines this information into one live interface.
+
+
+
+Dashboard Startup

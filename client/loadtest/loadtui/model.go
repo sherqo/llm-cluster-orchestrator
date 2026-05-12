@@ -227,7 +227,7 @@ func (m *Model) sendOne() tea.Cmd {
 }
 
 func runRequest(masterURL, id, userID, tier, prompt string, started time.Time) tea.Msg {
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	resp, err := sendChat(ctx, masterURL, userID, tier, prompt)
 	if err != nil {

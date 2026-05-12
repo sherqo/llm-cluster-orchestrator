@@ -1,0 +1,598 @@
+Meaning
+
+
+Default
+
+CHROMA_DB_PATH
+
+
+Where ChromaDB stores its persistent data
+
+
+/data/db
+
+DOCS_PATH
+
+
+Where source documents are located
+
+
+/data/docs
+
+COLLECTION_NAME
+
+
+Name of the Chroma collection
+
+
+documents
+
+
+
+The script connects to a persistent Chroma database:
+
+client = chromadb.PersistentClient(path=DB_PATH)
+
+Then it creates or loads the collection:
+
+collection = client.get_or_create_collection(COLLECTION_NAME)
+
+After that, it loops through the documents directory:
+
+for file in os.listdir(DOCS_PATH):
+
+It only accepts Markdown and text files:
+
+if not (file.endswith(".md") or file.endswith(".txt")):
+
+    continue
+
+Each valid document is opened, read, and added to a list:
+
+documents.append(f.read())
+
+ids.append(file)
+
+Finally, all documents are inserted into ChromaDB:
+
+collection.add(
+
+    documents=documents,
+
+    ids=ids
+
+)
+
+At the end, the script prints how many documents were indexed.
+
+This means that before the Workers can retrieve information, the documents must first be loaded into the Chroma database.
+
+
+
+ChromaDB Startup Process
+
+The vector database startup is controlled by:
+
+vector-db/entrypoint.sh
+
+When the container starts, it checks the INITIALIZE environment variable.
+
+If INITIALIZE is set to "true", the script clears the old database files and rebuilds the database:
+
+rm -rf /data/db/*
+
+python /app/scripts/init_db.py
+
+After initialization, it performs a test query:
+
+python /app/scripts/query.py --query "france" -k 3
+
+Then it starts the Chroma server:
+
+chroma run --host 0.0.0.0 --port 8000 --path /data/db
+
+This makes the vector database available to the Workers.
+
+
+
+Worker-Side RAG Logic
+
+The Worker-side RAG implementation is in:
+
+worker/rag.py
+
+This file is responsible for connecting to ChromaDB, loading the documents, retrieving relevant context, and returning that context to the Worker.
+
+The Worker reads its ChromaDB configuration from environment variables:
+
+CHROMA_URL = os.getenv("CHROMA_URL", "http://localhost:8000")
+
+COLLECTION_NAME = os.getenv("CHROMA_COLLECTION", "documents")
+
+TOP_K = int(os.getenv("RAG_TOP_K", "2"))
+
+MAX_CHUNK_CHARS = int(os.getenv("RAG_MAX_CHARS", "150"))
+
+These variables control the retrieval behavior.
+
+Variable
+
+
+Purpose
+
+
+Default
+
+CHROMA_URL
+
+
+URL of the ChromaDB server
+
+
+http://localhost:8000
+
+CHROMA_COLLECTION
+
+
+Collection name to query
+
+
+documents
+
+RAG_TOP_K
+
+
+Number of documents/chunks to retrieve
+
+
+2
+
+RAG_MAX_CHARS
+
+
+Maximum characters taken from each document
+
+
+150
+
+
+
+Loading Documents in the Worker
+
+When the Worker starts, worker/rag.py immediately calls:
+
+DOCUMENTS = _load_documents()
+
+This means the Worker loads documents once at startup and stores them in memory.
+
+The _load_documents() function first checks whether the Chroma collection exists:
+
+col_resp = requests.get(
+
+    f"{CHROMA_URL}/api/v1/collections/{COLLECTION_NAME}",
+
+    timeout=5,
+
+)
+
+If the collection is not found, RAG is disabled:
+
+print("[rag] WARNING: collection not found - RAG disabled")
+
+return []
+
+If the collection exists, the Worker gets the collection ID:
+
+col_id = col_resp.json()["id"]
+
+Then it requests the documents from ChromaDB:
+
+docs_resp = requests.post(
+
+    f"{CHROMA_URL}/api/v1/collections/{col_id}/get",
+
+    json={"include": ["documents"]},
+
+    timeout=10,
+
+)
+
+The returned documents are stored in the global DOCUMENTS variable.
+
+This means the Worker does not query ChromaDB for every request in the current implementation. Instead, it loads the documents from ChromaDB once and performs retrieval locally in memory.
+
+
+
+Retrieval Function
+
+The main retrieval function is:
+
+retrieve(prompt)
+
+This function receives the user prompt and returns a context string that will later be added to the LLM prompt.
+
+The function first checks if any documents were loaded:
+
+if not DOCUMENTS:
+
+    return ""
+
+If no documents are available, it returns an empty string. In that case, the LLM still answers, but without RAG context.
+
+Next, the prompt is converted into search terms:
+
+terms = [t for t in prompt.lower().split() if len(t) > 2]
+
+This removes very short words and keeps only meaningful terms.
+
+For example, if the prompt is:
+
+What happened on D-Day?
+
+The terms may include:
+
+what
+
+happened
+
+d-day
+
+Each document is then scored using the _score() function:
+
+def _score(doc: str, terms: list[str]) -> int:
+
+    text = doc.lower()
+
+    return sum(text.count(t) for t in terms if t)
+
+This function counts how many times the prompt terms appear in each document.
+
+Documents are sorted by score:
+
+scored = sorted(
+
+    ((doc, _score(doc, terms)) for doc in DOCUMENTS),
+
+    key=lambda x: x[1],
+
+    reverse=True,
+
+)
+
+The highest-scoring documents are selected first.
+
+
+
+Selecting Top Context
+
+After scoring the documents, the retrieval function selects the top results:
+
+top_docs = [doc[:MAX_CHUNK_CHARS] for doc, s in scored[:top_k] if s > 0]
+
+This means:
+
+    Only the top k documents are selected.
+
+    Documents must have a score greater than zero.
+
+    Each selected document is truncated to MAX_CHUNK_CHARS.
+
+By default:
+
+RAG_TOP_K = 2
+
+RAG_MAX_CHARS = 150
+
+So, the Worker retrieves two short pieces of context, each up to 150 characters.
+
+If no document matches the prompt terms, the system falls back to the first documents:
+
+if not top_docs:
+
+    top_docs = [doc[:MAX_CHUNK_CHARS] for doc in DOCUMENTS[:top_k]]
+
+Finally, the selected context is formatted:
+
+context = "\n\n".join(f"[{i+1}] {doc}" for i, doc in enumerate(top_docs))
+
+The result may look like:
+
+[1] D-Day was the Allied invasion of Normandy on June 6, 1944...
+
+
+
+[2] The Allied Powers coordinated military operations across Europe...
+
+This context is returned to the Worker.
+
+
+
+Adding RAG Context to the LLM Prompt
+
+After the Worker retrieves context, worker/main.py sends it to the model layer:
+
+rag_context = retrieve(message)
+
+reply = run_model(prompt=message, context=rag_context, worker_port=WORKER_PORT)
+
+The prompt construction happens in:
+
+worker/model.py
+
+The function responsible is:
+
+build_prompt(prompt, context)
+
+If context exists, the final prompt becomes:
+
+Use this context to answer the question. Give a direct answer only.
+
+Context: [retrieved context]
+
+Question: [user prompt]
+
+Answer:
+
+If no context is available, the prompt becomes:
+
+Answer this question directly: [user prompt]
+
+Answer:
+
+This design allows the system to continue working even if the vector database is unavailable. In that case, it simply falls back to normal LLM inference.
+
+
+
+Complete RAG Request Flow
+
+The full RAG request flow is:
+
+    User sends prompts to Master through /chat
+
+    Master validates the request and assigns a request ID
+
+    Master selects a healthy Worker using the routing strategy
+
+    Master sends the prompt to the Worker through gRPC
+
+    Worker receives the prompt in its Handle method
+
+    Worker calls retrieve(prompt) from worker/rag.py
+
+    retrieve() searches the loaded document collection
+
+    The most relevant document snippets are returned as context
+
+    Worker calls run_model(prompt, context, worker_port)
+
+    model.py builds an augmented prompt using the retrieved context
+
+    Worker sends the augmented prompt to Ollama through /api/generate
+
+    Ollama generates the final answer
+
+    Worker returns the answer to the Master through gRPC
+
+    Master returns the answer to the client as an HTTP response
+
+
+
+RAG Flow Diagram
+
+Client
+
+|
+
+| POST /chat
+
+v
+
+Master
+
+|
+
+| gRPC Handle(Request)
+
+v
+
+Worker
+
+|
+
+| retrieve(prompt)
+
+v
+
+RAG Module
+
+|
+
+| Load/query documents
+
+v
+
+ChromaDB / Loaded Documents
+
+|
+
+| Relevant context
+
+v
+
+Worker
+
+|
+
+| build_prompt(prompt, context)
+
+v
+
+Ollama
+
+|
+
+| Generated answer
+
+v
+
+Worker
+
+|
+
+| gRPC Response
+
+v
+
+Master
+
+|
+
+| HTTP response
+
+v
+
+Client
+
+
+
+Example of RAG in Action
+
+Suppose the user asks:
+
+What happened at Pearl Harbor?
+
+The Worker receives this question and calls:
+
+retrieve("What happened at Pearl Harbor?")
+
+The retrieval function checks the loaded documents and finds that 02-pearl-harbor.md contains matching terms such as pearl and harbor.
+
+It then returns a shortened context from that document. The model prompt becomes like:
+
+Use this context to answer the question. Give a direct answer only.
+
+
+
+Context:
+
+[1] Pearl Harbor was attacked by Japanese forces on December 7, 1941...
+
+
+
+Question: What happened at Pearl Harbor?
+
+Answer:
+
+The LLM then generates an answer based on that provided context.
+
+
+
+Fault Tolerance in the RAG Pipeline
+
+The RAG implementation includes basic fault tolerance.
+
+If the Chroma collection cannot be found, the Worker prints:
+
+[rag] WARNING: collection not found - RAG disabled
+
+If there is an error connecting to ChromaDB, the Worker catches the exception and returns an empty document list:
+
+except Exception as e:
+
+    print(f"[rag] WARNING: error loading documents: {e}")
+
+    return []
+
+If DOCUMENTS is empty, the retrieval function returns:
+
+return ""
+
+This means the Worker does not crash if the vector database is unavailable. Instead, it continues to answer using only the LLM.
+
+
+
+Important Implementation Note
+
+Although the project uses ChromaDB as the vector database, the current Worker retrieval logic does not perform a semantic vector search for every prompt. Instead, it loads documents from ChromaDB once and then scores them locally using keyword frequency.
+
+So the current implementation is a hybrid/simple RAG approach:
+
+    ChromaDB stores and serves the document collection.
+
+    The Worker loads the documents from ChromaDB.
+
+    The Worker performs local keyword-based ranking.
+
+    The selected text is added to the LLM prompt.
+
+This is simpler than full semantic retrieval, but it still demonstrates the RAG concept clearly: retrieve external context first, then generate an answer using that context.
+
+
+
+6.8 LLM Inference Integration
+
+The system uses Ollama as the local LLM runtime. Ollama is responsible for running the language model and generating the final answer after the Worker prepares the prompt.
+
+The LLM integration is implemented mainly in:
+
+worker/model.py
+
+The Worker does not generate text by itself. Instead, it prepares the input prompt, sends it to Ollama through an HTTP API call, receives the generated response, and returns that response back to the Master through gRPC.
+
+
+
+Purpose of LLM Inference Integration
+
+The purpose of this part is to connect the Worker with a real language model. The Worker handles request management, RAG retrieval, and prompt formatting, while Ollama handles the actual text generation.
+
+This separation makes the system cleaner because:
+
+Component
+
+
+Responsibility
+
+Worker
+
+
+Receives request, retrieves context, builds prompt
+
+Ollama
+
+
+Runs the LLM and generates the answer
+
+Master
+
+
+Routes requests and returns responses to the client
+
+
+
+So, the Worker acts as a bridge between the distributed cluster system and the local LLM runtime.
+
+
+
+Default Model Configuration
+
+In worker/model.py, the default model is defined as:
+
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "smollm:135m")
+
+This means the system uses:
+
+smollm:135m
+
+as the default model if no other model is provided.
+
+However, the model can be changed without editing the code by setting the environment variable:
+
+OLLAMA_MODEL
+
+For example:
+
+OLLAMA_MODEL=llama3.2
+
+This makes the Worker flexible because different models can be tested or deployed depending on available hardware and performance requirements.
+
+The file also defines a timeout value:

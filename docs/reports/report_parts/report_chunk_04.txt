@@ -1,0 +1,599 @@
+Host or IP address where the Agent can be reached
+
+port
+
+
+Port where the Agent HTTP server is listening
+
+workers
+
+
+Optional list of already-running Workers managed by this Agent
+
+Internal Flow
+
+When the Master receives an Agent registration request, it:
+
+    Validates that the method is POST.
+
+    Decodes the JSON body.
+
+    Stores the Agent in the router.
+
+    Checks whether the Agent reported existing Workers.
+
+    Re-adopts surviving Workers if they exist.
+
+    If no Workers exist, asks the Agent to create an initial Worker.
+
+The Agent is stored using:
+
+router.RegisterAgent(AgentInfo{
+
+    AgentID: req.AgentID,
+
+    Host:    req.Host,
+
+    Port:    req.Port,
+
+    AddedAt: time.Now(),
+
+})
+
+Worker Re-Adoption
+
+One important feature of this endpoint is worker recovery. If the Agent restarts but the Worker containers are still running, the Agent sends their information in the workers field.
+
+The Master then tries to reconnect to these Workers:
+
+wk, err := NewWorker(rw.WorkerID, rw.Address)
+
+If the connection succeeds, the Master adds the Worker back into its registry.
+
+This prevents unnecessary Worker recreation and improves fault recovery.
+
+Initial Worker Creation
+
+If the Agent registers with no existing Workers, the Master sends a spawn request to the Agent:
+
+go fireSpawnRequest(req.AgentID, agentAddr, callbackBase, router)
+
+This asks the Agent to create a new Worker container.
+
+Response Body
+
+The Master responds with:
+
+{
+
+  "status": "registered"
+
+}
+
+
+
+/workers/ready Endpoint
+
+The /workers/ready endpoint is used as an asynchronous callback from the Agent to the Master.
+
+Purpose
+
+Creating a Docker container does not mean the Worker is immediately ready. The Worker still needs time to start its Python process and open its gRPC port.
+
+Because of that, the Agent does not immediately tell the Master that the Worker is usable. Instead, the Agent waits until the Worker port is reachable, then calls /workers/ready.
+
+Request Method
+
+POST /workers/ready
+
+Request Body
+
+The request body is decoded into WorkerReadyNotification:
+
+type WorkerReadyNotification struct {
+
+    WorkerID    string `json:"worker_id"`
+
+    Address     string `json:"address"`
+
+    AgentID     string `json:"agent_id"`
+
+    ContainerID string `json:"container_id"`
+
+}
+
+Example request:
+
+{
+
+  "worker_id": "worker-agent-192.168.1.10-50051",
+
+  "address": "192.168.1.10:50051",
+
+  "agent_id": "agent-192.168.1.10-9000",
+
+  "container_id": "abc123"
+
+}
+
+Internal Flow
+
+When the Master receives this callback, it:
+
+    Validates the request method.
+
+    Decodes the JSON body.
+
+    Creates a new gRPC Worker connection.
+
+    Associates the Worker with the Agent ID.
+
+    Adds the Worker to the router.
+
+    Makes the Worker available for routing.
+
+The key step is:
+
+wk, err := NewWorker(workerID, note.Address)
+
+This creates the gRPC client connection to the Worker. If this succeeds, the Worker is considered ready.
+
+Then the Worker is registered using:
+
+router.AddWorkerWithInstance(wk)
+
+Response Body
+
+Example response:
+
+{
+
+  "status": "registered",
+
+  "worker_id": "worker-agent-192.168.1.10-50051"
+
+}
+
+Why This Endpoint Matters
+
+This endpoint prevents the Master from routing traffic to a Worker before it is ready. Without this callback, the Master might send a user request to a Worker container that has started but whose gRPC server is not yet listening.
+
+
+
+6.6.2. Agent HTTP Endpoints
+
+Agent endpoints are implemented in:
+
+agent/handlers.go
+
+The Agent listens on the configured address, usually port 9000.
+
+The Agent exposes four main endpoints:
+
+Endpoint
+
+
+Method
+
+
+Purpose
+
+/system/info
+
+
+GET
+
+
+Returns local machine resource information
+
+/workers/create
+
+
+POST
+
+
+Creates a Worker Docker container
+
+/workers/destroy
+
+
+DELETE
+
+
+Removes a specific Worker container
+
+/workers/clean
+
+
+POST
+
+
+Removes all Worker containers created by the Agent
+
+
+
+/system/info Endpoint
+
+Purpose
+
+This endpoint provides basic information about the machine where the Agent is running. It can be used for monitoring or future scheduling decisions.
+
+Request Method
+
+GET /system/info
+
+Response Body
+
+The Agent returns information such as:
+
+{
+
+  "os": "linux",
+
+  "cpu_usage": "23.5/100",
+
+  "memory_mb": "2048/8192"
+
+}
+
+Internal Implementation
+
+The endpoint uses the gopsutil library to collect CPU and memory information:
+
+cpu.Percent(0, false)
+
+mem.VirtualMemory()
+
+This allows the Agent to report local resource usage.
+
+
+
+/workers/create Endpoint
+
+The /workers/create endpoint is one of the most important Agent endpoints.
+
+Purpose
+
+It is used by the Master to ask an Agent to create a new Worker container. This is used during startup and autoscaling.
+
+Request Method
+
+POST /workers/create
+
+Request Body
+
+The request body is decoded into CreateWorkerRequest:
+
+type CreateWorkerRequest struct {
+
+    Env         []string `json:"env,omitempty"`
+
+    CallbackURL string   `json:"callback_url,omitempty"`
+
+    AgentID     string   `json:"agent_id,omitempty"`
+
+}
+
+Example request:
+
+{
+
+  "callback_url": "http://localhost:8080/workers/ready",
+
+  "agent_id": "agent-192.168.1.10-9000"
+
+}
+
+Internal Flow
+
+When the Agent receives this request, it:
+
+    Validates that the method is POST.
+
+    Decodes the JSON request body.
+
+    Calls docker.CreateWorker(req).
+
+    Allocates a free host port for the Worker.
+
+    Creates a Docker container from the configured Worker image.
+
+    Passes environment variables to the container.
+
+    Starts the container.
+
+    Wait until the Worker gRPC port is reachable.
+
+    Sends a callback to the Master.
+
+The worker is created in:
+
+agent/docker.go
+
+The Agent allocates a port from the configured port range:
+
+WorkerPortStart : WorkerPortEnd
+
+Then it creates the Worker container using Docker.
+
+The container receives important environment variables:
+
+WORKER_ID
+
+WORKER_PORT
+
+MASTER_URL
+
+OLLAMA_URL
+
+CHROMA_URL
+
+These variables tell the Worker which port to listen on and how to reach Ollama and ChromaDB.
+
+Asynchronous Callback
+
+The Agent does not block the Master until the Worker is fully ready. Instead, it immediately returns 202 Accepted, then waits in the background.
+
+The response looks like:
+
+{
+
+  "status": "accepted",
+
+  "worker_id": "worker-agent-192.168.1.10-50051",
+
+  "address": "192.168.1.10:50051"
+
+}
+
+Then the Agent runs:
+
+go waitAndCallback(resp, callbackURL, agentID)
+
+This background function checks when the Worker port becomes reachable. After that, it posts to the Master’s /workers/ready endpoint.
+
+Why This Endpoint Matters
+
+This endpoint enables dynamic scaling. When the Master detects high load, it can ask an Agent to create more Workers. This allows the system to increase capacity without manually starting Worker processes.
+
+
+
+/workers/destroy Endpoint
+
+Purpose
+
+This endpoint removes a specific Worker container. It is used when a Worker is no longer needed or when the Master removes a Worker during scale-down.
+
+Request Method
+
+DELETE /workers/destroy?worker_id=<worker_id>
+
+Example:
+
+DELETE /workers/destroy?worker_id=worker-agent-192.168.1.10-50051
+
+Internal Flow
+
+The Agent:
+
+    Checks that the request method is DELETE.
+
+    Reads the worker_id query parameter.
+
+    Calls Docker to remove the container.
+
+    Returns a success response.
+
+The destroy logic is implemented in agent/docker.go:
+
+ContainerRemove(ctx, name, container.RemoveOptions{Force: true})
+
+Response Body
+
+{
+
+  "status": "destroyed"
+
+}
+
+
+
+/workers/clean Endpoint
+
+Purpose
+
+This endpoint removes all Worker containers created from the configured Worker image.
+
+It is useful during testing, shutdown, or cleanup after failed experiments.
+
+Request Method
+
+POST /workers/clean
+
+Internal Flow
+
+The Agent:
+
+    Lists all Docker containers.
+
+    Checks which containers use the configured worker image.
+
+    Removes matching containers.
+
+    Returns how many containers were removed.
+
+Response Body
+
+{
+
+  "removed": 3
+
+}
+
+6.7. RAG Pipeline Implementation
+
+The system includes a Retrieval-Augmented Generation, or RAG, pipeline. The purpose of this pipeline is to improve the quality of LLM answers by giving the model extra information from an external document collection.
+
+Without RAG, the LLM would answer only using its pre-trained knowledge. With RAG, the Worker first searches for a local knowledge base, retrieves relevant text, adds that text to the prompt, and then sends the improved prompt to the LLM.
+
+In this project, the RAG pipeline is built using:
+
+Part
+
+
+Implementation
+
+Vector database
+
+
+ChromaDB
+
+Vector DB directory
+
+
+vector-db/
+
+Document source
+
+
+vector-db/embedded-docs/
+
+DB initialization script
+
+
+vector-db/scripts/init_db.py
+
+Worker retrieval logic
+
+
+worker/rag.py
+
+LLM prompt construction
+
+
+worker/model.py
+
+
+
+Purpose of the RAG Pipeline
+
+The RAG pipeline solves one important problem: the model may not always have enough accurate or project-specific knowledge to answer a question. Instead of depending only on the model’s internal knowledge, the system provides the model with relevant documents before generating the answer.
+
+For example, if the user asks:
+
+What happened on D-Day?
+
+The Worker can retrieve text from the embedded document about D-Day, add it to the prompt, and then ask the LLM to answer using that context.
+
+This makes the answer more grounded in the project’s own data.
+
+
+
+Vector Database Component
+
+The vector database is in:
+
+vector-db/
+
+This component uses ChromaDB, which stores documents and allows them to be retrieved later. In the project, ChromaDB is started as a separate service using Docker.
+
+The main files related to the vector database are:
+
+File
+
+
+Purpose
+
+vector-db/Dockerfile
+
+
+Builds the ChromaDB container image
+
+vector-db/docker-compose.yaml
+
+
+Runs the ChromaDB service
+
+vector-db/entrypoint.sh
+
+
+Initializes the database and starts Chroma
+
+vector-db/scripts/init_db.py
+
+
+Loads documents into ChromaDB
+
+vector-db/scripts/query.py
+
+
+Allows manual testing of document queries
+
+vector-db/embedded-docs/
+
+
+Stores the source documents
+
+The Docker Compose file exposes ChromaDB on port 8000:
+
+ports:
+
+   "8000:8000"
+
+This means Workers can access the vector database through:
+
+http://localhost:8000
+
+or through the configured CHROMA_URL.
+
+
+
+Document Storage
+
+The source documents are stored in:
+
+vector-db/embedded-docs/
+
+The project includes multiple Markdown documents about World War II topics, such as:
+
+01-causes-of-wwii.md
+
+02-pearl-harbor.md
+
+03-d-day.md
+
+04-battle-of-stalingrad.md
+
+05-holocaust.md
+
+09-major-leaders.md
+
+11-allied-powers.md
+
+14-pacific-theater.md
+
+15-european-theater.md
+
+These documents are the external knowledge base used by the RAG system.
+
+Only files ending in .md or .txt are loaded into the vector database. This behavior is implemented in vector-db/scripts/init_db.py.
+
+Database Initialization
+
+The initialization script is:
+
+vector-db/scripts/init_db.py
+
+This script prepares the ChromaDB collection and loads the documents.
+
+The script uses environment variables:
+
+DB_PATH = os.getenv("CHROMA_DB_PATH", "/data/db")
+
+DOCS_PATH = os.getenv("DOCS_PATH", "/data/docs")
+
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "documents")
+
+These variables define:
+
+Variable

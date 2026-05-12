@@ -1,0 +1,25 @@
+{
+  "StartTime": "2026-05-12T05:23:21",
+  "EndTime": "2026-05-12T05:24:02",
+  "DurationSeconds": 41.69159126281738,
+  "RequestsSent": 1000,
+  "RequestsOK": 1000,
+  "RequestsFailed": 0,
+  "InFlightMax": 1000,
+  "Latency": {
+    "Count": 1000,
+    "MinMs": 174.6084690093994,
+    "MaxMs": 22593.910932540894,
+    "AvgMs": 7064.76865696907,
+    "P50Ms": 6591.336727142334,
+    "P95Ms": 16574.289083480835,
+    "P99Ms": 19930.715322494507
+  },
+  "Rate": {
+    "CompletedPerSecOverall": 23.985652015442483,
+    "SentPerSecOverall": 23.985652015442483
+  },
+  "FreePct": 80,
+  "PaidTier": "pro",
+  "Concurrency": 200
+}
