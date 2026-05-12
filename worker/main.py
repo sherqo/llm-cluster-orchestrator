@@ -68,10 +68,18 @@ class Worker(worker_pb2_grpc.WorkerServiceServicer):
         return worker_pb2.PingResponse(status="ok")
 
     def Handle(self, request, context):
-        #  determine priority from tier
-        # master sends 0 for pro, 1 for free
-        priority = request.priority if request.priority in (0, 1) else 1
-        tier = "pro" if priority == 0 else "free"
+        #  determine tier from priority (inverted: lower num = higher priority for heapq)
+        # master sends: elite=10000, pro=100, free=50
+        # convert to heapq-friendly: elite=1, pro=2, free=3
+        if request.priority >= 1000:
+            tier = "elite"
+            priority = 1  # highest priority for heapq
+        elif request.priority >= 50:
+            tier = "pro"
+            priority = 2
+        else:
+            tier = "free"
+            priority = 3
 
         print(
             f"[worker:{WORKER_PORT}] received  request_id={request.request_id} tier={tier}"
@@ -89,11 +97,15 @@ class Worker(worker_pb2_grpc.WorkerServiceServicer):
         _, req_id, message = item
         print(f"[worker:{WORKER_PORT}] handling  request_id={req_id}")
 
-        #  RAG — retrieve relevant context from ChromaDB
-        rag_context = retrieve(message)
+        #  Tier-based config: elite gets RAG + 300 tokens, others get no RAG + 20 tokens
+        use_rag = (tier == "elite")
+        num_predict = 300 if tier == "elite" else 20
+
+        #  RAG — retrieve relevant context only for elite users
+        rag_context = retrieve(message) if use_rag else ""
 
         #  run this worker's private Ollama model instance
-        reply = run_model(prompt=message, context=rag_context, worker_port=WORKER_PORT)
+        reply = run_model(prompt=message, context=rag_context, worker_port=WORKER_PORT, num_predict=num_predict)
 
         #  return response + current queue depth (piggybacked)
         depth = self.queue.size()

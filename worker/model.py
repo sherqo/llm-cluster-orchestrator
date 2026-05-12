@@ -25,7 +25,7 @@ def build_prompt(prompt: str, context: str) -> str:
     )
 
 
-def run_model(prompt: str, context: str, worker_port: int) -> str:
+def run_model(prompt: str, context: str, worker_port: int, num_predict: int = 20) -> str:
     ollama_url = get_ollama_url(worker_port)
     full_prompt = build_prompt(prompt, context)
 
@@ -38,7 +38,7 @@ def run_model(prompt: str, context: str, worker_port: int) -> str:
                 "stream": False,
                 "options": {
                     "temperature": 0.2,
-                    "num_predict": 100,
+                    "num_predict": num_predict,
                 },
             },
             timeout=OLLAMA_TIMEOUT_SECONDS,
