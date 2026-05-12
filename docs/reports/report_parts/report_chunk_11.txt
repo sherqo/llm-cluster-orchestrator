@@ -1,0 +1,597 @@
+The master selects the least-loaded worker and transitions it to DRAINING state. No new requests are routed to a draining worker. Once its in-flight requests complete (or the drain timeout elapses), the master sends a shutdown command and the worker exits cleanly.
+
+
+
+7.5 Cooldowns and Soft Thresholds
+
+Without cooldowns, the autoscaler can thrash — rapidly scaling up and down in response to transient spikes, which itself introduces latency and wastes resources. Two cooldown windows are enforced:
+
+
+
+Cooldown Type
+
+
+Purpose
+
+Scale-up cooldown
+
+
+Minimum time between consecutive scale-up events (e.g., 30 s). Prevents spawning many workers in response to a single burst before newly started workers have registered.
+
+Scale-down cooldown
+
+
+Minimum time between consecutive scale-down events (e.g., 60 s). Prevents removing workers too aggressively after a traffic drop.
+
+
+
+Soft thresholds add hysteresis: scale-up fires at queue depth > 10 but scale-down only fires when queue depth = 0 (not just < 10). This prevents oscillation around the boundary.
+
+
+
+7.6 Worker Lifecycle States
+
+Each worker in the master's registry passes through a defined state machine:
+
+
+
+State
+
+
+Meaning
+
+
+Receives Traffic?
+
+STARTING
+
+
+Worker process launched; awaiting registration + first health check
+
+
+No
+
+HEALTHY
+
+
+Registered and passing health checks; normal operation
+
+
+Yes
+
+DRAINING
+
+
+Marked for shutdown; completing in-flight requests only
+
+
+No (new requests only)
+
+DEAD
+
+
+Health checks failed or drain timeout elapsed; removed from registry
+
+
+No
+
+
+
+The state transitions are: STARTING → HEALTHY (on successful registration + health check), HEALTHY → DRAINING (on scale-down selection), DRAINING → DEAD (on drain completion or timeout), HEALTHY → DEAD (on missed health checks).
+
+
+
+7.7 Cost and Resource Efficiency
+
+The autoscaler is designed to be cost-aware. Running LLMs on GPU hardware is expensive — every idle worker represents wasted spend. The scale-down logic is intentionally aggressive about removing idle capacity while the cooldowns prevent the cost of thrashing.
+
+
+
+Efficiency Principle
+
+The system targets a steady-state worker utilization of 60–80%. Below 40% utilization triggers scale-down consideration. Above 85% active concurrency triggers scale-up. This band prevents both waste and overload.
+
+
+
+
+
+8. Fault Tolerance
+
+A production LLM cluster must handle failures gracefully — workers crash, networks partition, and hardware fails. The LLM Cluster Orchestrator implements multiple layers of fault tolerance to ensure requests are not silently dropped and the system recovers automatically.
+
+8.1 Worker Failure Detection
+
+The master detects worker failures through a combination of missed heartbeats and active health checks. Every worker sends a periodic heartbeat to the master. If a worker misses a configurable number of consecutive heartbeats, the master marks it as DEAD and removes it from the routing pool.
+
+Detection Mechanism
+
+
+Detail
+
+Heartbeat interval
+
+
+Workers ping master every N seconds (configurable)
+
+Miss threshold
+
+
+After K consecutive missed heartbeats, worker transitions HEALTHY → DEAD
+
+gRPC error detection
+
+
+Immediate failure if the gRPC stream to worker errors (connection refused, EOF)
+
+In-flight tracking
+
+
+inflight.go tracks all outstanding requests per worker; on worker death, in-flight requests are surfaced for retry or error response
+
+Screenshot of worker logs showing heartbeat messages being sent, or master logs showing health check results (PASS/FAIL) for each registered worker
+
+8.2 Health Checks
+
+Beyond heartbeats, the master performs active health checks by sending a lightweight ping RPC to each worker. This catches cases where the worker process is alive but the LLM inference engine has stalled
+
+8.3 Request Timeout Handling
+
+LLM inference can be slow. Without timeouts, a single slow model could hold a worker hostage indefinitely. The master enforces two timeout boundaries:
+
+    Request timeout: Maximum time allowed for a complete request/response cycle. Exceeded requests return a 504 Gateway Timeout to the client.
+
+    Drain timeout: Maximum time a DRAINING worker waits for in-flight requests to complete before being forcefully terminated.
+
+
+
+8.4 Slow Worker Handling
+
+A worker may be alive and healthy by heartbeat but processing requests abnormally slowly — for example, if the GPU is thermally throttling. The latency-based autoscaling trigger catches this: if p95 latency exceeds the SLO, the system scales out additional workers rather than waiting for the slow worker to finish.
+
+The routing strategy (round-robin or least-connections) naturally routes new requests away from the overloaded worker while it finishes its current load.
+
+
+
+8.5 What Happens if a Worker Dies Mid-Request
+
+If a worker dies while processing a request, the in flight tracker in the master detects the orphaned request when the worker's gRPC stream closes. The master returns an error response to the client. The current implementation does not automatically retry mid-flight requests, as LLM inference is not idempotent retrying could produce duplicate completions.
+
+Mid-request retries are not implemented. Clients are expected to implement retry logic with idempotency keys if needed.
+
+8.6 What Happens if the Master Dies
+
+The master is currently a single point of failure. If it crashes, workers continue running but cannot receive new routing assignments, and clients cannot submit new requests. The master is designed to restart quickly it persists state to SQLite so it can reconstruct the worker registry and in-flight state on restart.
+
+The README notes that restart can be handled by systemd or the kernel watchdog. A highly-available master (with leader election) is a future enhancement.
+
+Screenshot of master restart — show the server coming back up and re-registering workers from its persisted database state.
+
+8.7 Updating Workers Without Downtime
+
+Rolling updates are supported through the worker lifecycle. To deploy a new worker version:
+
+    Start new workers with the updated binary — they register as STARTING then HEALTHY
+
+    Drain old workers — transition them to DRAINING; they finish current requests
+
+    Old workers exit after drain completes — zero dropped requests
+
+
+
+This rolling approach means at least one old and one new worker overlap during the update window, ensuring continuous availability.
+
+8.8 Current Fault Tolerance Limitations
+
+
+
+Limitation
+
+
+Impact / Mitigation
+
+No mid-request retry
+
+
+Client sees error if worker dies mid-inference; client must retry
+
+Single master (no HA)
+
+
+Master crash = full outage until restart; mitigated by fast restart + system
+
+No cross-node agent coordination
+
+
+Each agent manages one host; no cross-host failover of workers
+
+No persistent request queue
+
+
+Queued-but-not-started requests are lost on master crash
+
+No circuit breaker
+
+
+A misbehaving worker receives traffic until heartbeat timeout elapses
+
+
+
+
+
+9. Testing and Evaluation
+
+9.1 Testing Environment
+
+9.2 Unit Testing
+
+9.3 Integration Testing
+
+9.4 Load Testing
+
+9.5 Worker Registration Testing
+
+9.6 Autoscaling Testing
+
+9.7 Failure Simulation
+
+9.8 Sample Test Cases
+
+9.9 Performance Metrics
+
+    - Latency
+
+    - Throughput
+
+    - Worker utilization
+
+    - Successful requests
+
+    - Failed requests
+
+9.10 Results and Discussion
+
+
+
+10. Sample Output
+
+This section presents real sample outputs from each component of the LLM Cluster Orchestrator  the master terminal UI, agent process logs, worker inference logs, client HTTP output, Docker container startup, and a complete end-to-end chat interaction. These outputs demonstrate the system operating correctly under normal conditions and provide a reference for what healthy operation looks like.
+
+
+
+The master exposes a real-time terminal user interface (TUI) that refreshes every second. It is the primary observability surface for operators managing the cluster.
+
+
+
+The TUI is divided into four panels:
+
+    Worker Registry Panel — table listing each registered worker with its ID, current state (STARTING / HEALTHY / DRAINING / DEAD), active request count, p50 and p95 latency, and last heartbeat timestamp.
+
+    Cluster Metrics Panel — aggregated queue depth gauge, total active requests across all workers, cluster-wide p95 latency, and autoscaling event counter.
+
+    Event Log Panel — scrollable list of the most recent system events: scale-up triggers, scale-down triggers, worker failures, and request timeouts.
+
+    Request History Panel — recent request IDs with assigned worker, duration, and HTTP status code.
+
+:Full-screen screenshot of the Master TUI during active load — show all four panels with at least 3 HEALTHY workers, a non-zero queue depth, and visible latency readings in the metrics panel.
+
+
+
+Worker rows are colour-coded for instant situational awareness: green = HEALTHY (serving traffic), yellow = STARTING (not yet eligible for traffic), orange = DRAINING (finishing existing requests only), red = DEAD (removed from routing pool).
+
+
+
+The agent runs as a daemon on each host, receiving spawn and drain commands from the master via gRPC and managing worker processes on its local machine. Its logs capture the full lifecycle of every worker it manages.
+
+
+
+[2026-05-09 14:30:00] INFO  Agent v1.0 started on host worker-node-01
+
+[2026-05-09 14:30:00] INFO  Listening for master gRPC commands on :50051
+
+[2026-05-09 14:30:01] INFO  Connected to master at master:50050 — registration OK
+
+
+
+--- Scale-up event triggered by master (queue depth exceeded threshold) ---
+
+[2026-05-09 14:32:05] INFO  Received SpawnWorker RPC (worker_id=w-004, port=50054)
+
+[2026-05-09 14:32:05] INFO  Spawning: python main.py --id w-004 --port 50054
+
+[2026-05-09 14:32:08] INFO  Worker w-004 process started successfully (PID 18432)
+
+[2026-05-09 14:32:10] INFO  Worker w-004 confirmed registration with master (STARTING→HEALTHY)
+
+
+
+--- Scale-down event (cluster idle, scale-down cooldown elapsed) ---
+
+[2026-05-09 14:45:22] INFO  Received DrainWorker RPC (worker_id=w-004)
+
+[2026-05-09 14:45:22] INFO  Sent SIGTERM to worker w-004 (PID 18432) — entering drain mode
+
+[2026-05-09 14:45:35] INFO  Worker w-004 exited cleanly with code 0
+
+[2026-05-09 14:45:35] INFO  Host capacity restored
+
+
+
+--- Unexpected worker crash ---
+
+[2026-05-09 15:10:44] WARN  Worker w-002 (PID 14821) exited unexpectedly (exit code -9)
+
+[2026-05-09 15:10:44] ERROR Notifying master of unplanned death (worker_id=w-002)
+
+
+
+SCREENSHOT REQUIRED: Screenshot of the actual agent terminal during a scale-up event — show the SpawnWorker RPC receipt line and the worker process start line with a real PID number.
+
+Figure 10.2 — Agent log: SpawnWorker RPC received and worker process w-004 launched (PID 18432)
+
+Screenshot of the actual agent terminal
+
+10.3 Worker Logs
+
+Each worker is a Python process that loads an LLM model, registers with the master, processes inference requests, and shuts down gracefully when drained. Worker logs provide a detailed trace of each step.
+
+
+
+[2026-05-09 14:32:06] INFO  Worker w-004 starting (port=50054)
+
+[2026-05-09 14:32:06] INFO  Loading model: llama-3-8b-instruct (4-bit quantized)
+
+[2026-05-09 14:32:08] INFO  Model loaded in 2.14 s
+
+[2026-05-09 14:32:08] INFO  gRPC server listening on :50054
+
+[2026-05-09 14:32:09] INFO  Registering with master at master:50050...
+
+[2026-05-09 14:32:09] INFO  Registration ACK — state: STARTING
+
+[2026-05-09 14:32:12] INFO  Health check PASS — state: HEALTHY — now receiving traffic
+
+
+
+--- Request 1 ---
+
+[2026-05-09 14:33:01] INFO  [req-0091] Inference request received
+
+[2026-05-09 14:33:01] INFO  [req-0091] Prompt tokens: 128 — fetching RAG context...
+
+[2026-05-09 14:33:01] INFO  [req-0091] Vector DB query: 'causes of world war 2'
+
+[2026-05-09 14:33:01] INFO  [req-0091] Retrieved 3 document chunks (185 ms)
+
+[2026-05-09 14:33:01] INFO  [req-0091] Augmented prompt tokens: 312
+
+[2026-05-09 14:33:03] INFO  [req-0091] Inference complete — tokens: 418 — latency: 1.82 s
+
+
+
+--- Request 2 ---
+
+[2026-05-09 14:34:18] INFO  [req-0098] Inference request received
+
+[2026-05-09 14:34:20] INFO  [req-0098] Inference complete — tokens: 203 — latency: 1.44 s
+
+
+
+--- Graceful shutdown ---
+
+[2026-05-09 14:45:22] INFO  Drain signal received — no new requests accepted
+
+[2026-05-09 14:45:22] INFO  1 in-flight request remaining — waiting...
+
+[2026-05-09 14:45:34] INFO  All requests complete — shutting down cleanly
+
+
+
+SCREENSHOT REQUIRED: Screenshot of actual worker terminal output — show at minimum: model loading line, Registration ACK, Health check PASS, and at least one complete request cycle with real latency numbers.
+
+Figure 10.3 — Worker log: model load (2.14 s), registration, RAG retrieval (185 ms), inference (1.82 s)
+
+Screenshot of worker terminal output
+
+
+
+10.4 Client Output
+
+Clients submit inference requests to the master's HTTP API using a JSON schema similar to the OpenAI Chat Completions format. Below is a complete example using curl.
+
+
+
+Request
+
+curl -X POST http://localhost:8080/chat \
+
+  -H 'Content-Type: application/json' \
+
+  -d '{
+
+    "model": "llama-3-8b-instruct",
+
+    "messages": [
+
+      { "role": "system", "content": "You are a helpful history assistant." },
+
+      { "role": "user",   "content": "What was the significance of D-Day?" }
+
+    ],
+
+    "max_tokens": 512,
+
+    "temperature": 0.7
+
+  }'
+
+
+
+Response
+
+HTTP/1.1 200 OK
+
+Content-Type: application/json
+
+
+
+{
+
+  "id": "req-0091",
+
+  "model": "llama-3-8b-instruct",
+
+  "worker_id": "w-002",
+
+  "latency_ms": 1820,
+
+  "usage": {
+
+    "prompt_tokens": 312,
+
+    "completion_tokens": 418,
+
+    "total_tokens": 730
+
+  },
+
+  "choices": [{
+
+    "index": 0,
+
+    "message": {
+
+      "role": "assistant",
+
+      "content": "D-Day, the Allied invasion of Normandy on June 6 1944, was one of the
+
+       most consequential military operations of World War II. It opened a second major
+
+       front in Western Europe, forcing Germany to split its defensive resources between
+
+       the Eastern and Western fronts simultaneously. The successful establishment of a
+
+       beachhead in France accelerated the Allied advance toward Germany and is widely
+
+       considered the beginning of the end of Nazi occupation of Western Europe..."
+
+    },
+
+    "finish_reason": "stop"
+
+  }]
+
+}
+
+
+
+SCREENSHOT REQUIRED: Screenshot of the curl command being run in terminal and the complete JSON response — ideally in a split terminal or scrolled to show the full response body including the choices[0].message.content field.
+
+Figure 10.4 — Client curl request and full JSON response (worker w-002, 1.82 s, 730 total tokens)
+
+
+
+The worker_id field in the response allows operators to correlate client-reported latency with specific worker logs. The usage object provides prompt and completion token counts for cost accounting and quota enforcement.
+
+
+
+10.5 Docker Container Output
+
+The vector-db service runs in Docker, providing a Python-based embedding and retrieval service backed by ChromaDB. On startup it loads the embedding model, indexes the 15-document WWII corpus, and begins serving HTTP requests.
+
+
+
+$ docker compose up vector-db
+
+[+] Running 1/1
+
+ v Container llm-cluster-orchestrator-vector-db-1  Started
+
+Attaching to llm-cluster-orchestrator-vector-db-1
+
+
+
+vector-db  | ==========================================
+
+vector-db  |  LLM Cluster — Vector DB Service v1.0
+
+vector-db  | ==========================================
+
+vector-db  | Loading embedding model: all-MiniLM-L6-v2
+
+vector-db  | Embedding model loaded (384-dim) in 3.21 s
+
+vector-db  | Initialising ChromaDB collection: 'documents'
+
+vector-db  | Scanning /embedded-docs/ — found 15 documents
+
+vector-db  | [1/15]  01-causes-of-wwii.md        ... OK
+
+vector-db  | [2/15]  02-pearl-harbor.md          ... OK
+
+vector-db  | [3/15]  03-d-day.md                 ... OK
+
+vector-db  | ...
+
+vector-db  | [15/15] 15-european-theater.md      ... OK
+
+vector-db  | Indexed 15 documents (847 chunks) in 8.44 s
+
+vector-db  | HTTP service ready on :8001
+
+vector-db  | GET /health  -> 200 OK
+
+vector-db  | GET /query   -> ready
+
+vector-db  | ==========================================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+SCREENSHOT REQUIRED: Screenshot of docker compose up vector-db in terminal — show the full startup sequence including model loading, all 15 documents being indexed, and the 'HTTP service ready on :8001' message.
+
+Figure 10.5 — Docker container startup: all-MiniLM-L6-v2 loaded, 15 documents / 847 chunks indexed, service ready
+
+ Screenshot of docker compose up vector-db in terminal
+
+
+
+The entrypoint.sh script manages startup logic. If the ChromaDB collection already exists from a previous run, the indexing step is skipped and startup completes in under one second, improving developer iteration speed.

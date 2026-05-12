@@ -1,0 +1,599 @@
+Explanation:
+This code initializes the Master router, starts the HTTP server, redirects logs to the monitoring system, and launches the TUI dashboard.
+
+
+
+C.2 Chat Request Handler
+
+File:
+
+master/lib/server.go
+
+http.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
+
+    chatRequestHandler(w, r, router, admission, metrics)
+
+})
+
+resp, err := router.HandleChat(r.Context(), requestIDStr, req)
+
+Explanation:
+The /chat endpoint receives user prompts, assigns a request ID, sends the request to the router, and returns the Worker response.
+
+
+
+C.3 Worker Selection Strategy
+
+File:
+
+master/lib/strategy.go
+
+func (r *Router) pickLeastConnections() (*Worker, error) {
+
+    var best *Worker
+
+    var minActive int64 = -1
+
+
+
+    for _, worker := range r.workers {
+
+        if !worker.isRoutable() {
+
+            continue
+
+        }
+
+
+
+        active := worker.ActiveRequests()
+
+        if best == nil || active < minActive {
+
+            best = worker
+
+            minActive = active
+
+        }
+
+    }
+
+
+
+    if best == nil {
+
+        return nil, ErrNoWorkersAvailable
+
+    }
+
+
+
+    return best, nil
+
+}
+
+Explanation:
+This code selects the healthy Worker with the fewest active requests. It helps distribute requests more efficiently across Workers.
+
+
+
+C.4 Master-to-Worker gRPC Call
+
+File:
+
+master/lib/worker.go
+
+resp, err := w.client.Handle(ctx, &pb.Request{
+
+    RequestId: requestID,
+
+    Message:   req.Prompt,
+
+    Priority:  tierToPriority(req.Tier),
+
+})
+
+Explanation:
+The Master sends the request to a Worker using gRPC. The request includes the request ID, user prompt, and priority.
+
+
+
+C.5 Worker gRPC Handler
+
+File:
+
+worker/main.py
+
+def Handle(self, request, context):
+
+    priority = request.priority if request.priority in (0, 1) else 1
+
+    tier = "pro" if priority == 0 else "free"
+
+
+
+    self.queue.push(priority, request.request_id, request.message)
+
+
+
+    item = self.queue.pop()
+
+    if item is None:
+
+        context.abort(grpc.StatusCode.INTERNAL, "queue unexpectedly empty")
+
+        return
+
+
+
+    _, req_id, message = item
+
+
+
+    rag_context = retrieve(message)
+
+
+
+    reply = run_model(
+
+        prompt=message,
+
+        context=rag_context,
+
+        worker_port=WORKER_PORT
+
+    )
+
+
+
+    depth = self.queue.size()
+
+
+
+    return worker_pb2.Response(
+
+        request_id=req_id,
+
+        reply=reply,
+
+        queue_length=depth,
+
+    )
+
+Explanation:
+This code receives a request from the Master, adds it to the priority queue, retrieves RAG context, calls the LLM, and returns the generated answer.
+
+
+
+C.6 RAG Retrieval
+
+File:
+
+worker/rag.py
+
+def retrieve(prompt: str, top_k: int = TOP_K) -> str:
+
+    if not DOCUMENTS:
+
+        return ""
+
+
+
+    terms = [t for t in prompt.lower().split() if len(t) > 2]
+
+
+
+    scored = sorted(
+
+        ((doc, _score(doc, terms)) for doc in DOCUMENTS),
+
+        key=lambda x: x[1],
+
+        reverse=True,
+
+    )
+
+
+
+    top_docs = [doc[:MAX_CHUNK_CHARS] for doc, s in scored[:top_k] if s > 0]
+
+
+
+    if not top_docs:
+
+        top_docs = [doc[:MAX_CHUNK_CHARS] for doc in DOCUMENTS[:top_k]]
+
+
+
+    context = "\n\n".join(
+
+        f"[{i+1}] {doc}" for i, doc in enumerate(top_docs)
+
+    )
+
+
+
+    return context
+
+Explanation:
+This function retrieves relevant document snippets based on the user prompt and returns them as context for the LLM.
+
+
+
+C.7 Ollama Inference Call
+
+File:
+
+worker/model.py
+
+response = requests.post(
+
+    f"{ollama_url}/api/generate",
+
+    json={
+
+        "model": OLLAMA_MODEL,
+
+        "prompt": full_prompt,
+
+        "stream": False,
+
+        "options": {
+
+            "temperature": 0.2,
+
+            "num_predict": 200,
+
+        },
+
+    },
+
+    timeout=OLLAMA_TIMEOUT_SECONDS,
+
+)
+
+Explanation:
+This code sends the final prompt to Ollama and receives the generated LLM response.
+
+
+
+C.8 Docker Worker Creation
+
+File:
+
+agent/docker.go
+
+resp, err := d.client.ContainerCreate(
+
+    ctx,
+
+    &container.Config{
+
+        Image: image,
+
+        Env:   env,
+
+        Labels: map[string]string{
+
+            "llm.cluster.role":      "worker",
+
+            "llm.cluster.agent_id":  d.cfg.AgentID,
+
+            "llm.cluster.worker_id": workerID,
+
+            "llm.cluster.host_port": strconv.Itoa(hostPort),
+
+        },
+
+    },
+
+    &container.HostConfig{
+
+        NetworkMode: container.NetworkMode("host"),
+
+        RestartPolicy: container.RestartPolicy{
+
+            Name: "unless-stopped",
+
+        },
+
+    },
+
+    nil,
+
+    nil,
+
+    name,
+
+)
+
+Explanation:
+This code creates a Worker container, passes environment variables, attaches labels, and uses host networking so the Master can reach the Worker.
+
+
+
+C.9 Worker Ready Callback
+
+File:
+
+agent/handlers.go
+
+go waitAndCallback(resp, callbackURL, agentID)
+
+payload, err := json.Marshal(map[string]string{
+
+    "worker_id":    resp.WorkerID,
+
+    "address":      resp.Address,
+
+    "agent_id":     agentID,
+
+    "container_id": resp.ContainerID,
+
+})
+
+Explanation:
+After creating a Worker, the Agent waits until the Worker gRPC port is reachable and then notifies the Master using /workers/ready.
+
+
+
+C.10 Metrics Collection
+
+File:
+
+master/lib/metrics.go
+
+type ClusterMetrics struct {
+
+    QueueDepth        float64
+
+    P95Latency        float64
+
+    WorkerUtilization float64
+
+    ErrorRate         float64
+
+    RequestsPerSec    float64
+
+    TotalWorkers      int
+
+    HealthyWorkers    int
+
+    InFlight          int
+
+    QueueSize         int
+
+    RPSTrend          float64
+
+    CollectedAt       time.Time
+
+}
+
+Explanation:
+This structure stores the main metrics used by the dashboard and autoscaler.
+
+
+
+Appendix D: Testing Logs
+
+
+
+This appendix includes sample testing logs and screenshots collected while running the system.
+
+
+
+D.1 Master Startup Log
+
+[Insert screenshot of Master terminal/TUI startup here]
+
+Figure D.1: Master node startup and TUI dashboard.
+
+Example log:
+
+no workers available at startup
+
+LB listening on :8080
+
+
+
+D.2 Agent Registration Log
+
+[Insert screenshot of Agent terminal registration here]
+
+Figure D.2: Agent registering with the Master.
+
+Example log:
+
+agent listening on :9000
+
+registered agent agent-127.0.0.1-9000 with master http://localhost:8080
+
+
+
+D.3 Worker Creation Log
+
+[Insert screenshot of Worker creation or Docker container startup here]
+
+Figure D.3: Worker container created by the Agent.
+
+Example log:
+
+creating worker
+
+container started
+
+worker is ready, notifying master
+
+callback sent for worker, master responded 200
+
+
+
+D.4 Chat Request Test
+
+[Insert screenshot of Thunder Client or curl request to /chat here]
+
+Figure D.4: Testing the /chat endpoint using Thunder Client or curl.
+
+Example request:
+
+{
+
+  "userId": "user-1",
+
+  "prompt": "What happened on D-Day?",
+
+  "tier": "pro"
+
+}
+
+Example response:
+
+{
+
+  "requestId": "generated-request-id",
+
+  "reply": "D-Day was the Allied invasion of Normandy on June 6, 1944..."
+
+}
+
+
+
+D.5 RAG Retrieval Test
+
+[Insert screenshot of ChromaDB/vector database query test here]
+
+Figure D.5: Testing RAG retrieval from ChromaDB.
+
+Example command:
+
+python /app/scripts/query.py --query "D-Day" -k 3
+
+Example output:
+
+Rank: 1
+
+ID: 03-d-day.md
+
+Distance: ...
+
+Snippet: D-Day was the Allied invasion of Normandy...
+
+
+
+D.6 Autoscaling / Stress Test Log
+
+[Insert screenshot of stress test terminal output here]
+
+Figure D.6: Stress test output showing multiple requests sent to the Master.
+
+Example command:
+
+./stress_test.sh
+
+Example log:
+
+Sending request 1
+
+Sending request 2
+
+Sending request 3
+
+...
+
+
+
+D.7 Master TUI During Load
+
+[Insert screenshot of Master TUI during stress testing here]
+
+Figure D.7: Master TUI showing active Workers, in-flight requests, and autoscaling metrics during load testing.
+
+This screenshot should show:
+
+    Active Workers.
+
+    In-flight requests.
+
+    Worker states.
+
+    Autoscaling metrics.
+
+    Logs or events showing system activity.
+
+
+
+D.8 Docker Containers
+
+[Insert screenshot of Docker containers running here]
+
+Figure D.8: Docker containers showing running Worker and ChromaDB services.
+
+Example command:
+
+docker ps
+
+Example output:
+
+CONTAINER ID   IMAGE                STATUS        PORTS
+
+abc123         llm-worker:latest    Up ...
+
+def456         vector-db-chroma     Up ...
+
+
+
+D.9 Summary of Testing
+
+The testing process verified that:
+
+Test
+
+
+Result
+
+Master starts successfully
+
+
+Passed
+
+Agent registers with Master
+
+
+Passed
+
+Worker container is created
+
+
+Passed
+
+Worker readiness callback works
+
+
+Passed
+
+/chat endpoint returns a response
+
+
+Passed
+
+RAG retrieves relevant context
+
+
+Passed
+
+Ollama generates an answer
+
+
+Passed
+
+TUI displays Workers and requests
+
+
+Passed
+
+Docker containers run correctly
+
+
+Passed
+
+These tests confirm that the main system flow works end-to-end: the client sends a request to the Master, the Master routes it to a Worker, the Worker retrieves context, Ollama generates a response, and the Master returns the final answer.

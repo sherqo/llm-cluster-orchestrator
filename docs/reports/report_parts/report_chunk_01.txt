@@ -1,0 +1,599 @@
+Abstract
+
+Large Language Model services are expensive, slow compared with ordinary web requests, and sensitive to sudden bursts of traffic. A single inference server can become a bottleneck because each request may require token generation, retrieval of supporting context, and GPU or CPU computation. The project solves this problem by designing a distributed LLM cluster orchestrator that accepts many client requests, chooses suitable workers, executes inference in parallel, and monitors cluster health.
+
+ The implemented system is organized around a Go master/load balancer, Go agents that manage local worker containers, and Python worker nodes that expose a gRPC service. The worker integrates Retrieval-Augmented Generation through a Chroma-backed document store and uses Ollama as the local model runtime. The master provides HTTP endpoints for clients and agents, tracks in-flight work, applies admission control, records latency and error metrics, and runs an autoscaling loop.
+
+ The main distributed computing techniques used are request routing, least-connections scheduling, round-robin scheduling, bounded admission control, asynchronous metrics collection, worker lifecycle management, gRPC keepalive, retry-oriented routing, and autoscaling with cooldowns and hysteresis. Testing is supported by stress-test scripts that generate up to 1000 parallel requests and gradual bursts designed to observe autoscaling behavior.
+
+
+
+1. Introduction
+
+1.1 Project Background
+
+Modern LLM applications are often used by many users at the same time. Unlike a normal database lookup or static API call, an LLM request may take seconds because the system must prepare the prompt, optionally retrieve context, call a model runtime, and stream or return generated text. If all requests are sent to one server, the system becomes slow and fragile. Distributed computing addresses this by dividing the workload across multiple nodes and coordinating them through a controller.
+
+This project applies distributed-computing concepts to an LLM inference service. The system behaves like a small cluster: clients send chat requests to a master, the master routes each request to a worker, workers perform RAG and model inference, and agents help the master create or remove workers on available machines.
+
+1.2 Problem Statement
+
+The main problem is to serve 1000+ concurrent LLM requests with acceptable response time, controlled resource usage, and graceful behavior when workers are overloaded or unavailable. The system must distribute requests instead of letting one machine become the single computation point. It also needs a way to observe cluster load, add capacity when demand rises, and remove capacity when the system is idle.
+
+1.3 Project Objectives
+
+Design a distributed architecture for high-concurrency LLM inference.
+
+ • Implement a master/load balancer capable of routing requests to multiple workers.
+
+• Use gRPC for the internal hot path between the master and workers.
+
+ • Integrate RAG so answers can be grounded in an external knowledge base.
+
+• Track active requests, latency, throughput, errors, and worker state
+
+• Support autoscaling through agents that can spawn or terminate worker containers.
+
+• Evaluate the design using stress tests, failure simulation, and metrics.
+
+1.4 Scope of the Project
+
+The submitted implementation focuses on a working local/distributed prototype. It demonstrates request routing, worker registration, agent registration, worker creation through Docker, Chroma-based retrieval, Ollama-based generation, metrics collection, admission control, and autoscaling logic. It is not a fully production-hardened cloud platform, but it provides the core construction details needed to reason about such a platform.
+
+2. Background and Wider Reading
+
+2.1 Distributed Computing Concepts
+
+A distributed system is a collection of independent computers that cooperate over a network and appear to users as a single service. Instead of placing all work on one machine, computation is divided across nodes. Each node may run a process, store part of the data, execute tasks, or coordinate other nodes. This improves scalability and availability, but it also introduces communication delays, partial failures, and coordination problems.
+
+The most important idea in distributed computing is that failure is partial. In a single-process program, a crash is usually obvious. In a distributed system, one node can fail while others continue running, a network link can become slow, or a message can be delayed without being lost. Because of this, distributed systems usually need health checks, timeouts, retries, logging, and mechanisms for deciding which nodes are currently safe to use.
+
+Common distributed-computing terms include nodes, workers, coordinators, queues, replicas, messages, RPC calls, consistency, availability, and fault tolerance. A node is a machine or container that participates in the system. A worker performs actual computation. A coordinator assigns work or tracks state. Replication means keeping multiple copies of a service or data item to improve availability. A queue stores work temporarily when requests arrive faster than workers can process them.
+
+2.2 Load Balancing in Distributed Systems
+
+Load balancing is the process of distributing incoming requests across multiple backend nodes. The goal is to prevent one node from becoming overloaded while other nodes are idle. A good load balancer improves throughput, reduces average latency, and protects the service from sudden bursts of traffic.
+
+2.3 GPU Cluster Task Distribution
+
+GPU cluster task distribution refers to assigning compute-heavy jobs to a group of machines that contain GPUs or other accelerators. GPUs are effective for parallel numerical workloads because they can perform many matrix operations at the same time. Modern deep-learning inference and training workloads often depend on GPUs because neural networks require many tensor operations.
+
+Task distribution can be horizontal or parallel. Horizontal distribution sends different requests to different workers. Parallel distribution splits one large computation across multiple devices. Data parallelism processes multiple independent examples at the same time
+
+
+
+2.4 Large Language Model Inference Workloads
+
+LLM inference is the process of using a trained language model to generate text from an input prompt. Unlike a normal web request, an LLM request can be slow and
+
+LLM workloads are hard to balance because requests are not equal. A short question may finish quickly, while a long prompt with a long answer may use much more computation. The same service may also receive bursts of traffic, causing queues to form. This makes metrics such as active requests, queue depth, latency, throughput, and error rate important for controlling the system.
+
+Another important concept is the context window. The context window is the maximum amount of text that the model can consider at once. Longer context can improve answer quality when relevant information is included, but it also increases memory use and processing time. Systems that serve LLMs must therefore manage prompt size carefully.
+
+2.5 Retrieval-Augmented Generation
+
+Retrieval-Augmented Generation, called RAG, combines information retrieval with text generation. The main idea is to retrieve relevant external documents before asking the language model to answer. The retrieved text is placed into the prompt as context, so the model can generate an  answer using information that may not be stored in its parameters. The original RAG work describes this approach as a way to improve knowledge-intensive NLP tasks by combining parametric model knowledge with retrieved non-parametric knowledge
+
+2.6 Fault Tolerance and Autoscaling
+
+Fault tolerance means that a system continues to provide acceptable service even when some components fail. Distributed systems must expect failures because nodes can crash, containers can stop, networks can partition, disks can fill, and requests can time out. A fault-tolerant design assumes that failures will happen and limits their impact.
+
+Common fault-tolerance mechanisms include health checks, heartbeats, timeouts, retries, circuit breakers, replication, graceful shutdown, and request idempotency. A health check asks whether a component is alive and ready. A timeout prevents one slow operation from blocking forever. A retry attempts the operation again, usually on another node or after a delay. A circuit breaker stops sending requests to a component that is failing repeatedly.
+
+Autoscaling is the process of changing the amount of compute capacity based on demand. Horizontal autoscaling adds or removes replicas, while vertical scaling changes the resources assigned to existing replicas
+
+2.7 Related Technologies and Systems
+
+Several technologies commonly appear in distributed LLM-serving systems. They are not concepts by themselves, but they support the practical implementation of the concepts discussed above.
+
+Technology or system type
+
+
+Conceptual role
+
+RPC frameworks such as gRPC
+
+
+Allow services on different machines to call defined methods using structured messages.
+
+Containers such as Docker
+
+
+Package an application with its dependencies into an isolated unit that can run consistently across environments. Containers are useful for deploying many workers on the same host
+
+Vector databases
+
+
+Store embeddings and support similarity search for retrieval workflows. They are widely used in RAG
+
+Local or hosted LLM runtimes
+
+
+Expose model inference through an API. A runtime receives a prompt, executes the model, and returns generated text.
+
+Monitoring and observability tools
+
+
+Collect metrics, logs, and traces so can understand latency, errors, utilization, and system behavior during failures.
+
+Together, these technologies support the practical goals of distributed LLM serving: distributing requests, isolating workers, monitoring system health, retrieving external knowledge, and adjusting capacity as demand changes.
+
+3. Requirements Analysis
+
+3.1 Functional Requirements
+
+FR-1 - Client chat request handling. The system shall allow clients to submit LLM requests to the master through the HTTP POST /chat endpoint. A request contains userId, prompt, and tier fields. The master validates the JSON body, records the request in the metrics collector, generates a UUID-based request ID, forwards the request to an eligible worker, and returns a JSON response containing requestId and reply.
+
+FR-2 - Admission control and backpressure. The system shall protect the cluster from unlimited request bursts. The admission controller calculates the active concurrency limit from the number of healthy workers and a default maximum of 50 concurrent requests per worker. If the system is above the active limit, requests enter a bounded queue of up to 500 pending requests. If the queue is full, the master returns a service-unavailable response. If a request waits longer than 30 seconds, the master returns a queue-timeout response.
+
+FR-3 - Load-balanced worker selection. The master shall distribute accepted requests across registered workers. The default routing strategy is least-connections, where the router selects the healthy worker with the fewest active requests. The code also includes round-robin routing. Both strategies ignore non-routable workers and reject routing when the selected worker already has 50 or more active requests.
+
+FR-4 - Internal gRPC communication. The master shall communicate with workers using the WorkerService gRPC interface defined in worker.proto. The service exposes Handle for processing chat requests and Ping for health checks. A worker request contains request_id, message, and priority. A worker response contains request_id, reply, queue_length, and a retries field reserved in the protocol.
+
+FR-5 - Worker lifecycle management. The system shall maintain explicit worker lifecycle states. The code defines STARTING, WARMING, HEALTHY, DRAINING, STOPPING, and DEAD. Only HEALTHY workers are routable. STARTING workers are placeholders created after an agent accepts a spawn request, and they become usable only after the agent confirms readiness and the master opens a gRPC connection.
+
+FR-6 - Worker health checking. The master shall check worker availability. The health loop runs every 5 seconds and pings idle workers that are HEALTHY or WARMING. If Ping fails, the worker is marked DRAINING so that no new requests are routed to it. If Ping succeeds for a warming worker, the worker is marked HEALTHY.
+
+FR-7 - Agent registration. Agents shall register with the master through POST /agents/register. The registration includes agent_id, host, port, and optionally a list of running workers. This allows the master to know which agents are available and to re-adopt surviving workers after an agent or master restart.
+
+FR-8 - Docker-based worker creation. The master shall request new workers through an agent. The agent exposes POST /workers/create, creates a worker container from the configured image, assigns a free host port from the configured worker port range, labels the container with worker metadata, and runs it using host networking. The agent returns 202 Accepted and then waits for the worker gRPC port to become reachable before sending a /workers/ready callback to the master.
+
+FR-9 - Worker removal and cleanup. The system shall support worker destruction and cleanup through the agent. The agent exposes DELETE /workers/destroy and POST /workers/clean. The master can remove a worker from the router, close the gRPC connection, and request that the hosting agent remove the corresponding Docker container.
+
+FR-10 - Autoscaling. The system shall automatically add or remove workers based on observed load.
+
+FR-11 - Resource-aware agent selection. When multiple agents exist, the autoscaler shall select an agent for spawning using a least-workers-first policy. Failed spawn attempts are retried with exponential backoff, and agents with repeated failures are temporarily penalized so the autoscaler avoids immediately selecting them again.
+
+FR-12 - RAG context retrieval. Each worker shall attempt to retrieve supporting context from Chroma before calling the model. The worker loads documents from the configured Chroma collection, scores documents against prompt terms, selects the top documents, and adds them to the generated prompt. If Chroma is unavailable or no documents are loaded, the worker still proceeds without retrieved context.
+
+FR-13 - Ollama-based LLM inference. Each worker shall generate answers by sending a request to Ollama's /api/generate endpoint. The default model is smollm:135m. The worker builds either a context-augmented prompt or a direct prompt, disables streaming, limits generation length, applies a temperature value, and returns clear error strings for connection, timeout, HTTP, or unexpected failures.
+
+FR-14 - Priority-aware request handling. The system shall represent user tiers as priority values so that premium users can be served before free users. The worker contains a priority queue where lower numeric priority is served first. The intended behavior is pro-before-free processing, although the current master-to-worker numeric mapping needs correction as discussed in Section 3.5.
+
+FR-15 - Monitoring and dashboard support. The system shall expose enough runtime data for the terminal dashboard and debugging logs. The router and metrics collector track total workers, healthy workers, in-flight requests, queue size, request rate, error rate, P95 latency, smoothed utilization, autoscaler decisions, worker startup time, and recent in-flight/completed requests.
+
+FR-16 - Stress testing support. The project shall include scripts for evaluation. The stress test sends 1000 parallel requests to /chat with a mix of free and pro tiers. The gradual stress test sends phased bursts of 75, 150, 300, 50, and 500 requests to observe scaling behavior, queueing, cooldowns, and recovery.
+
+3.2 Non-Functional Requirements
+
+NFR-1 - Scalability. The system shall scale horizontally by creating additional worker containers instead of forcing all inference through one worker. Autoscaling is bounded by configurable minimum and maximum worker counts to prevent uncontrolled growth.
+
+NFR-2 - Responsiveness under load. The master shall use admission control, per-worker capacity limits, least-connections routing, and gRPC communication to reduce overload and keep requests responsive during bursts.
+
+NFR-3 - Fault tolerance at worker level. The system shall avoid routing new requests to workers that fail health checks or enter draining states. Failed or unreachable workers should be isolated from future traffic so healthy workers can continue serving requests.
+
+NFR-4 - Graceful scale-down. When removing workers, the autoscaler shall mark selected workers as DRAINING, wait for their active requests to complete for up to 120 seconds, then close the connection, mark the worker DEAD, remove it from the router, and ask the agent to destroy the container.
+
+3.3 User Stories
+
+    As an end user, I want to submit a prompt through the client or HTTP API so that I can receive an LLM-generated answer without knowing which worker handled the request.
+
+    As a free-tier user, I want my request to be accepted when the cluster has capacity, even if premium requests may receive higher priority during heavy load.
+
+    As a pro-tier user, I want the system to recognize my tier so that my requests can be prioritized when there is contention.
+
+    As a system administrator, I want to see worker count, agent count, active requests, queue depth, latency, error rate, and autoscaler activity so that I can understand the health of the cluster.
+
+    As the master, I want to admit requests only when capacity exists so that the cluster does not collapse under sudden bursts.
+
+    As the router, I want to select only HEALTHY workers so that requests are not sent to starting, draining, stopping, or dead workers.
+
+    As an agent, I want to register with the master and report surviving workers so that the master can rebuild its view of the cluster after restarts.
+
+    As an agent, I want to create worker containers and notify the master only after the worker port is reachable so that traffic is not routed to a worker before it is ready.
+
+    As a worker, I want to retrieve relevant Chroma documents before calling Ollama so that generated responses can use external context.
+
+    As the autoscaler, I want to add workers when utilization, latency, queue depth, or traffic trend shows sustained growth so that bursts can be handled.
+
+3.4 System Assumptions
+
+The master is the single entry point for client traffic and is reachable at the configured HTTP address, which defaults to localhost:8080 in the prototype.
+
+Clients communicate with the master, not directly with workers. This keeps worker addresses, lifecycle states, and routing strategy hidden from users.
+
+Agents are reachable from the master over HTTP and can advertise a host and port that the master can use for worker creation requests.
+
+Docker is installed and running on machines that host agents. The configured worker image is available before the agent attempts to create containers.
+
+Worker containers expose a gRPC service on the assigned port and use the protocol defined in worker.proto.
+
+Ollama is installed or reachable at the configured OLLAMA_URL. The default model smollm:135m is available or can be pulled before testing.
+
+Chroma is reachable at the configured CHROMA_URL when RAG is required. If Chroma is down, workers continue without RAG context.
+
+3.5 Constraints and Limitations from the Environment
+
+Local machine capacity.  limited by the CPU, memory, storage, Docker capacity, and Ollama performance of the local or LAN machines. The system demonstrates distributed orchestration, but it does not provide the same capacity as a real GPU cluster.
+
+Single-master limitation. The master is a single point of coordination for routing, metrics, admission control, worker registration, and autoscaling. If the master process fails, the current implementation depends on an external restart mechanism and does not automatically elect a new master.
+
+Host networking and port constraints. Worker containers use host networking and require available host ports. This is convenient for local development but can be less portable across operating systems and stricter container environments.
+
+Autoscaling delay. Autoscaling decisions are based on periodic metrics and worker-ready callbacks. Scale-up is not instant because the agent must create a Docker container, wait for the worker port, and notify the master.
+
+4. System Design and Architecture
+
+4.1 High-Level Architecture
+
+At a high level, the system consists of six main layers: the client layer, master/load balancer, agent, worker nodes, RAG/vector database, and Ollama LLM runtime.
+
+The client sends requests to the master using HTTP. The master acts as the system entry point and is responsible for selecting an appropriate worker. The worker receives the request using gRPC, optionally retrieves relevant context from the vector database, sends the final prompt to Ollama, and returns the response to the master. The master then returns the final response to the client.
+
+The agent operates beside the master as a resource manager. It is responsible for creating and destroying worker containers using Docker. This means worker lifecycle management is not hardcoded into the master. Instead, the master communicates with registered agents and asks them to create workers when more compute capacity is needed.
+
+The overall architecture can be summarized as follows:
+
+Client
+
+Shape
+
+ HTTP request
+
+Shape
+
+Master / Load Balancer
+
+|
+
+ gRPC request
+
+|
+
+v
+
+Worker Node
+
+|
+
+ Retrieval request
+
+|
+
+v
+
+RAG / Vector Database
+
+|
+
+ LLM generation request
+
+|
+
+v
+
+Ollama Runtime
+
+The control path for creating workers is slightly different:
+
+Master
+
+|
+
+| HTTP create-worker request
+
+v
+
+Agent
+
+|
+
+| Docker API
+
+v
+
+Worker Container
+
+|
+
+| HTTP ready callback
+
+v
+
+Master
+
+This separation between the request execution path and the worker management path is an important design choice. It allows the system to process user traffic independently from the logic that scales or maintains the cluster.
+
+4.2 System Components
+
+    Client Layer
+
+The client layer represents the user-facing side of the system. In the implemented project, the client is a terminal-based chat interface written in Go. It allows a user to type prompts and receive responses from the distributed LLM system.
+
+The client communicates only with the master. It does not communicate with workers directly. This is important because the client should not need to know how many workers exist, where they are running, which workers are healthy, or which routing strategy is currently active.
+
+The client sends requests to the master using the /chat endpoint. A typical request has the following structure:
+
+{
+
+  "userId": "somaya",
+
+  "prompt": "Who were the major leaders in World War II?",
+
+  "tier": "free"
+
+}
+
+The userId identifies the user, the prompt contains the question or task, and the tier field allows the system to apply priority rules. In the implementation, the master converts the tier into a priority value before forwarding the request to a worker.
+
+
+
+This design supports the coursework requirement of handling many concurrent user requests because the client layer is separated from the execution layer. Multiple clients can send requests to the same master endpoint, and the master is responsible for distributing those requests.
+
+
+
+    Master / Load Balancer
+
+The master is the central control component of the system. It is implemented in Go and acts as both a load balancer and cluster coordinator.
+
+The master exposes several HTTP endpoints:
+
+POST /chat
+
+POST /agents/register
+
+POST /workers/ready
+
+The /chat endpoint is used by clients to submit LLM requests. The /agents/register endpoint is used by agents when they start. The /workers/ready endpoint is used by agents to notify the master that a worker container has started successfully and is ready to receive gRPC requests.
+
+Inside the master, the Router object maintains the registered workers and agents. It is responsible for selecting a worker when a request arrives. The router also maintains an in-flight request tracker, which records which requests are currently being processed.
+
+The master performs the following functions:
+
+- Accepts incoming user requests.
+
+- Generates unique request IDs.
+
+- Applies admission control.
+
+- Selects workers using a routing strategy.
+
+- Sends requests to workers through gRPC.
+
+- Tracks in-flight requests.
+
+- Records latency and error metrics.
+
+- Registers agents and workers.
+
+- Performs health checks.
+
+- Runs the autoscaler.
+
+The master does not perform LLM inference itself. This is a deliberate design choice. If the master handled inference, it would become a computational bottleneck. Instead, it only coordinates the system and delegates computation to workers.
+
+The master also contains a terminal user interface that displays worker count, agent count, in-flight requests, logs, statistics, autoscaling state, and system events. This supports the administrator monitoring requirement in the coursework.
+
+    Agent
+
+The agent is a resource management service that runs on a compute node. It is responsible for managing workers’ containers on that machine.
+
+The agent is implemented in Go and exposes several HTTP endpoints:
+
+GET /system/info
+
+POST /workers/create
+
+DELETE /workers/destroy
+
+POST /workers/clean
+
+
+
+When the agent starts, it registers itself with the master by sending a request to:
+
+POST /agents/register
+
+The registration request includes the agent ID, host, port, and any already-running workers. This allows the master to know which agents are available for creating workers.
+
+When the master needs a new worker, it sends a request to the agent’s /workers/create endpoint. The agent then uses the Docker API to create a new worker container from the llm-worker:latest image.
+
+After creating the container, the agent does not immediately tell the master that the worker is ready. Instead, it waits until the worker’s gRPC port becomes reachable. Once the port is reachable, the agent sends a callback to:
+
+POST /workers/ready
+
+This callback-based design prevents the master from routing traffic to a worker before the worker is ready.
+
+The agent therefore acts as the bridge between the master’s scheduling logic and the machine-level Docker environment.
+
+
+
+    Worker Nodes
+
+Worker nodes are responsible for executing the actual LLM request. In this project, workers are implemented in Python and run inside Docker containers.
+
+Each worker exposes a gRPC service defined in the Protocol Buffers file worker.proto. The service includes two main RPC methods:
+
+rpc Handle(Request) returns (Response);
+
+rpc Ping(PingRequest) returns (PingResponse);
+
+
+
+The Handle method is used to process chat requests. The Ping method is used by the master health checker to verify that the worker is still alive.
+
+When a worker receives a request, it performs several steps:
+
+1. Receives the request from the master.
+
+2. Reads the request ID, message, and priority.
+
+3. Adds the request to its local priority queue.
+
+4. Retrieves relevant context using the RAG module.
+
+5. Builds a prompt using the user question and retrieved context.
+
+6. Sends the prompt to Ollama.
+
+7. Returns the generated response to the master.
+
+The worker uses a priority queue to support differentiated request handling. Higher-priority requests can be served before lower-priority requests. This supports the idea of user tiers such as free and pro users.
+
+Workers are designed to be disposable. If the system load increases, more workers can be created. If load decreases, extra workers can be drained and removed. This container-based design supports scalability.
+
+
+
+    RAG / Vector Database
+
+The RAG component improves the quality of responses by retrieving relevant information from a document collection before generating the answer.
+
+The project uses ChromaDB as the vector database. The vector database stores embedded documents and allows the worker to retrieve context related to the user’s query.
+
+
+
+The RAG logic is implemented in the worker through rag.py . When a prompt arrives, the worker attempts to load relevant documents from ChromaDB. The retrieved text is then inserted into the final prompt sent to Ollama.
+
+The RAG flow is:
+
+
+
+User question
+
+|
+
+Worker RAG module
+
+|
+
+Retrieve relevant context
+
+|
+
+Build augmented prompt
+
+|
+
+Send to Ollama
+
+
+
+This design is important for LLM systems because the model may not know all domain-specific information. By adding retrieved context, the system can provide more grounded and relevant answers.
+
+In the current implementation, RAG is optional. If ChromaDB is unavailable, the worker can continue and generate an answer using only LLM. This improves robustness during local testing.
+
+
+
+    Ollama / LLM Runtime
+
+Ollama is used as the local LLM inference runtime. It provides an HTTP API that workers can call to generate responses.
+
+The worker communicates with Ollama using the /api/generate endpoint. The model used is:
+
+
+
+The Ollama integration is implemented in worker/model.py. This module is responsible for:
+
+- selecting the model name,
+
+- reading the Ollama URL,
+
+- constructing the final prompt,
+
+
+
+- sending the HTTP request to Ollama,
+
+- handling timeouts and errors,
+
+- returning the generated text.
+
+The worker uses environment variables such as OLLAMA_URL to know where the Ollama service is running. This makes the deployment more flexible, because Ollama may run on the host machine, inside WSL, or on another server.
+
+Using Ollama allows the project to demonstrate real LLM inference without requiring a cloud API.
+
+4.3 Communication Flow
+
+The system uses both HTTP and gRPC communication. HTTP is used for external and management communication, while gRPC is used for master-to-worker inference calls.
+
+HTTP communication is used between:
+
+Client à Master
+
+Agent àMaster
+
+Master à Agent
+
+Worker à Ollama
+
+Worker -à ChromaDB
+
+gRPC communication is used between:
+
+Master àWorker
+
+This separation is suitable because HTTP is simple and flexible for APIs such as registration and callbacks, while gRPC is efficient and strongly typed for worker execution.
+
+The full startup and request flow is:
+
+1. The master starts and listens on port 8080.
+
+2. The agent starts and registers with the master.
+
+3. The master stores the agent in its agent registry.
+
+4. The master or autoscaler requests worker creation.
+
+5. The agent creates a Docker worker container.
+
+6. The agent waits for the worker gRPC port to become reachable.
+
+7. The agent sends a /workers/ready callback to the master.
+
+8. The master connects to the worker using gRPC.
+
+9. The worker is added to the worker registry.
+
+10. The client sends a chat request to /chat.
+
+11. The master selects a healthy worker.
+
+12. The master forwards the request to the worker using gRPC.
+
+13. The worker performs RAG retrieval if configured.
+
+14. The worker calls Ollama for LLM generation.
+
+15. The worker sends the response back to the master.
+
+16. The master returns the response to the client.
+
+This communication model supports distributed execution because each component communicates through explicit interfaces rather than direct internal function calls.
+
+4.4 Request Lifecycle
+
+The request lifecycle describes what happens from the moment a user sends a prompt until a response is returned.
+
+First, the client sends an HTTP request to the master’s /chat endpoint. The master validates the JSON body and extracts the user ID, prompt, and tier.
+
+The master then records that a new request has arrived. This is used by the metrics collector to calculate request rate and error rate.
+
+Next, the master generates a unique request ID. This request ID allows the system to track the request across components.
+
+The master then calls the router to select a worker. The router only chooses workers that are currently healthy. Workers in STARTING, DRAINING, STOPPING, or DEAD states are not selected for new work.
+
+After selecting a worker, the master adds the request to the in-flight registry. This records that the request is currently assigned to a specific worker.
+
+The master then sends a gRPC request to the worker. The worker receives the request, processes it using RAG and Ollama, and returns a response.
+
+When the master receives the response, it removes the request from the in-flight registry and records the request latency.
+
+Finally, the master returns the response to the client.
+
+The lifecycle is:
+
+Client submits prompt
+
+|
+
+Master validates request
+
+|
+
+Master assigns request ID
+
+|
+
+Master records request metric
+
+|

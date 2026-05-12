@@ -1,0 +1,62 @@
+\section{Requirements Analysis}
+
+\subsection{Functional Requirements}
+\begin{enumerate}[label=FR-\arabic*., leftmargin=1.8em]
+  \item Client chat request handling. The system shall allow clients to submit LLM requests to the master through the HTTP POST /chat endpoint. A request contains userId, prompt, and tier fields. The master validates the JSON body, records the request in the metrics collector, generates a UUID-based request ID, forwards the request to an eligible worker, and returns a JSON response containing requestId and reply.
+  \item Admission control and backpressure. The system shall protect the cluster from unlimited request bursts. The admission controller calculates the active concurrency limit from the number of healthy workers and a default maximum of 50 concurrent requests per worker. If the system is above the active limit, requests enter a bounded queue of up to 500 pending requests. If the queue is full, the master returns a service-unavailable response. If a request waits longer than 30 seconds, the master returns a queue-timeout response.
+  \item Load-balanced worker selection. The master shall distribute accepted requests across registered workers. The default routing strategy is least-connections, where the router selects the healthy worker with the fewest active requests. The code also includes round-robin routing. Both strategies ignore non-routable workers and reject routing when the selected worker already has 50 or more active requests.
+  \item Internal gRPC communication. The master shall communicate with workers using the WorkerService gRPC interface defined in worker.proto. The service exposes Handle for processing chat requests and Ping for health checks. A worker request contains request_id, message, and priority. A worker response contains request_id, reply, queue_length, and a retries field reserved in the protocol.
+  \item Worker lifecycle management. The system shall maintain explicit worker lifecycle states. The code defines STARTING, WARMING, HEALTHY, DRAINING, STOPPING, and DEAD. Only HEALTHY workers are routable. STARTING workers are placeholders created after an agent accepts a spawn request, and they become usable only after the agent confirms readiness and the master opens a gRPC connection.
+  \item Worker health checking. The master shall check worker availability. The health loop runs every 5 seconds and pings idle workers that are HEALTHY or WARMING. If Ping fails, the worker is marked DRAINING so that no new requests are routed to it. If Ping succeeds for a warming worker, the worker is marked HEALTHY. In the current implementation, workers with active requests are not pinged to avoid false draining under load.
+  \item Agent registration. Agents shall register with the master through POST /agents/register. The registration includes agent_id, host, port, and optionally a list of running workers. This allows the master to know which agents are available and to re-adopt surviving workers after an agent or master restart.
+  \item Docker-based worker creation. The master shall request new workers through an agent. The agent exposes POST /workers/create, creates a worker container from the configured image, assigns a free host port from the configured worker port range, labels the container with worker metadata, and runs it using host networking on Linux. The agent returns 202 Accepted and then waits for the worker gRPC port to become reachable before sending a /workers/ready callback to the master.
+  \item Worker removal and cleanup. The system shall support worker destruction and cleanup through the agent. The agent exposes DELETE /workers/destroy and POST /workers/clean. The master can remove a worker from the router, close the gRPC connection, and request that the hosting agent remove the corresponding Docker container.
+  \item Autoscaling. The system shall automatically add or remove workers based on observed load.
+  \item Resource-aware agent selection. When multiple agents exist, the autoscaler shall select an agent for spawning using a least-workers-first policy. Failed spawn attempts are retried with exponential backoff, and agents with repeated failures are temporarily penalized so the autoscaler avoids immediately selecting them again.
+  \item RAG context retrieval. Each worker shall attempt to retrieve supporting context from Chroma before calling the model. The worker loads documents from the configured Chroma collection, scores documents against prompt terms, selects the top documents, and adds them to the generated prompt. If Chroma is unavailable or no documents are loaded, the worker still proceeds without retrieved context.
+  \item Ollama-based LLM inference. Each worker shall generate answers by sending a request to Ollama's /api/generate endpoint. The default model is smollm:135m. The worker builds either a context-augmented prompt or a direct prompt, disables streaming, limits generation length, applies a temperature value, and returns clear error strings for connection, timeout, HTTP, or unexpected failures.
+  \item Priority-aware request handling. The system shall represent user tiers as priority values so that premium users can be served before free users. The worker contains a priority queue where lower numeric priority is served first. The current implementation converts master priorities into heap-friendly values in the worker to ensure elite > pro > free ordering.
+  \item Monitoring and dashboard support. The system shall expose enough runtime data for the terminal dashboard and debugging logs. The router and metrics collector track total workers, healthy workers, in-flight requests, queue size, request rate, error rate, P95 latency, smoothed utilization, autoscaler decisions, worker startup time, and recent in-flight/completed requests.
+  \item Stress testing support. The project shall include scripts for evaluation. The stress test sends 1000 parallel requests to /chat with a mix of free and pro tiers. The gradual stress test sends phased bursts of 75, 150, 300, 50, and 500 requests to observe scaling behavior, queueing, cooldowns, and recovery.
+\end{enumerate}
+
+\subsection{Non-Functional Requirements}
+\begin{enumerate}[label=NFR-\arabic*., leftmargin=1.8em]
+  \item Scalability. The system shall scale horizontally by creating additional worker containers instead of forcing all inference through one worker. Autoscaling is bounded by configurable minimum and maximum worker counts to prevent uncontrolled growth.
+  \item Responsiveness under load. The master shall use admission control, per-worker capacity limits, least-connections routing, and gRPC communication to reduce overload and keep requests responsive during bursts.
+  \item Fault tolerance at worker level. The system shall avoid routing new requests to workers that fail health checks or enter draining states. Failed or unreachable workers should be isolated from future traffic so healthy workers can continue serving requests.
+  \item Graceful scale-down. When removing workers, the autoscaler shall mark selected workers as DRAINING, wait for their active requests to complete for up to 120 seconds, then close the connection, mark the worker DEAD, remove it from the router, and ask the agent to destroy the container.
+\end{enumerate}
+
+\subsection{User Stories}
+\begin{itemize}[leftmargin=1.5em]
+  \item As an end user, I want to submit a prompt through the client or HTTP API so that I can receive an LLM-generated answer without knowing which worker handled the request.
+  \item As a free-tier user, I want my request to be accepted when the cluster has capacity, even if premium requests may receive higher priority during heavy load.
+  \item As a pro-tier user, I want the system to recognize my tier so that my requests can be prioritized when there is contention.
+  \item As a system administrator, I want to see worker count, agent count, active requests, queue depth, latency, error rate, and autoscaler activity so that I can understand the health of the cluster.
+  \item As the master, I want to admit requests only when capacity exists so that the cluster does not collapse under sudden bursts.
+  \item As the router, I want to select only HEALTHY workers so that requests are not sent to starting, draining, stopping, or dead workers.
+  \item As an agent, I want to register with the master and report surviving workers so that the master can rebuild its view of the cluster after restarts.
+  \item As an agent, I want to create worker containers and notify the master only after the worker port is reachable so that traffic is not routed to a worker before it is ready.
+  \item As a worker, I want to retrieve relevant Chroma documents before calling Ollama so that generated responses can use external context.
+  \item As the autoscaler, I want to add workers when utilization, latency, queue depth, or traffic trend shows sustained growth so that bursts can be handled.
+\end{itemize}
+
+\subsection{System Assumptions}
+\begin{itemize}[leftmargin=1.5em]
+  \item The master is the single entry point for client traffic and is reachable at the configured HTTP address, which defaults to localhost:8080 in the prototype.
+  \item Clients communicate with the master, not directly with workers. This keeps worker addresses, lifecycle states, and routing strategy hidden from users.
+  \item Agents are reachable from the master over HTTP and can advertise a host and port that the master can use for worker creation requests.
+  \item Docker is installed and running on machines that host agents. The configured worker image is available before the agent attempts to create containers.
+  \item Worker containers expose a gRPC service on the assigned port and use the protocol defined in worker.proto.
+  \item Ollama is installed or reachable at the configured OLLAMA_URL. The default model smollm:135m is available or can be pulled before testing.
+  \item Chroma is reachable at the configured CHROMA_URL when RAG is required. If Chroma is down, workers continue without RAG context.
+\end{itemize}
+
+\subsection{Constraints and Limitations from the Environment}
+\begin{itemize}[leftmargin=1.5em]
+  \item Local machine capacity, limited by the CPU, memory, storage, Docker capacity, and Ollama performance of the local or LAN machines. The system demonstrates distributed orchestration, but it does not provide the same capacity as a real GPU cluster.
+  \item Single-master limitation. The master is a single point of coordination for routing, metrics, admission control, worker registration, and autoscaling. If the master process fails, the current implementation depends on an external restart mechanism and does not automatically elect a new master.
+  \item Host networking and port constraints. Worker containers use host networking and require available host ports. This is convenient for local development but can be less portable across operating systems and stricter container environments.
+  \item Autoscaling delay. Autoscaling decisions are based on periodic metrics and worker-ready callbacks. Scale-up is not instant because the agent must create a Docker container, wait for the worker port, and notify the master.
+\end{itemize}

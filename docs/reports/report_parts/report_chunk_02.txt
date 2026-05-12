@@ -1,0 +1,600 @@
+Router selects healthy worker
+
+|
+
+Request added to in-flight tracker
+
+|
+
+Master sends gRPC request
+
+|
+
+Worker performs RAG retrieval
+
+|
+
+Worker calls Ollama
+
+|
+
+Worker returns response
+
+|
+
+Request removed from in-flight tracker
+
+|
+
+Latency recorded
+
+|
+
+Response returned to client
+
+
+
+If no healthy worker is available, the master returns a service unavailable error. This prevents the request from being silently lost.
+
+If no healthy worker is available, the master returns a service unavailable error. This prevents the request from being silently lost.
+
+4.5 Worker Registration Lifecycle
+
+Worker registration is a critical part of the system because the master must only route traffic to workers that are actually ready.
+
+The lifecycle begins when an agent starts. The agent sends a registration request to the master. This request includes the agent ID, host, port, and any running workers.
+
+The master stores this information in its agent registry. If the agent does not report any existing workers, the master requests that the agent creates one.
+
+The agent creates a worker container using Docker. At this stage, the worker is not immediately considered usable. The container may exist, but the Python gRPC server inside it may still be starting.
+
+To handle this, the master initially tracks the worker as STARTING. The agent then repeatedly checks the worker’s gRPC port. When the port becomes reachable, the agent sends a callback to the master’s /workers/ready endpoint.
+
+The master then tries to establish a gRPC connection to the worker. If the connection succeeds, the worker is registered as healthy and becomes available for request routing.
+
+The lifecycle is:
+
+Agent starts
+
+|
+
+Agent registers with master
+
+|
+
+Master stores agent
+
+|
+
+Master requests worker creation
+
+|
+
+Agent creates Docker container
+
+|
+
+Worker is marked STARTING
+
+|
+
+Agent waits for gRPC port
+
+|
+
+Agent sends ready callback
+
+|
+
+Master connects to worker
+
+|
+
+Worker becomes HEALTHY
+
+This design avoids premature registration. A worker is not considered available simply because Docker created a container. It must also pass a network readiness check.
+
+
+
+4.6 Autoscaling Lifecycle
+
+The autoscaler is implemented inside the master. It periodically evaluates the cluster state and decides whether to add or remove workers.
+
+The autoscaler uses metrics collected from the router and metrics collector. These include:
+
+- total number of workers,
+
+- number of healthy workers,
+
+- number of in-flight requests,
+
+- queue depth,
+
+- worker utilization,
+
+- request latency,
+
+- error rate,
+
+- requests per second.
+
+The autoscaler supports scale-up and scale-down behavior.
+
+Scale-up happens when the system detects high load or when there are no workers available. The autoscaler checks whether the scale-up cooldown has passed, selects an available agent, and requests a new worker.
+
+Scale-down happens when the system detects sustained low load. The autoscaler does not immediately remove workers after a short quiet period. Instead, it waits for the low-load condition to remain true for a configured duration. This avoids unstable scaling behavior.
+
+During scale-down, workers are not killed immediately. A selected worker is first marked as DRAINING. This means it should not receive new requests, but it can finish any active requests. Once the worker has no active requests, it can be removed safely.
+
+The scale-up lifecycle is:
+
+Autoscaler tick
+
+|
+
+Collect metrics
+
+|
+
+Detect high load or zero workers
+
+|
+
+Check cooldown
+
+|
+
+Select agent
+
+|
+
+Request worker creation
+
+|
+
+Worker registers through callback
+
+The scale-down lifecycle is:
+
+Autoscaler tick
+
+|
+
+Collect metrics
+
+|
+
+Detect sustained low load
+
+|
+
+Select least busy worker
+
+|
+
+Mark worker as DRAINING
+
+|
+
+Wait for active requests to finish
+
+|
+
+Remove worker from registry
+
+|
+
+Ask agent to destroy container
+
+This lifecycle supports both performance and cost efficiency. The system can increase capacity when demand grows and reduce resource usage when demand is low.
+
+
+
+4.7 Failure Handling Design
+
+The system includes several mechanisms for handling failures.
+
+The first mechanism is worker health checking. The master periodically sends Ping requests to workers. If a worker fails to respond, it is marked as unhealthy or draining. This prevents the router from sending new requests to a failed worker.
+
+The second mechanism is request timeout handling. The master does not wait indefinitely for a worker response. If a worker becomes too slow or stops responding, the request can fail with a controlled error instead of blocking forever.
+
+The third mechanism is lifecycle-based routing. Workers are only considered routable when they are in the HEALTHY state. This prevents the system from sending requests to workers that are starting, draining, stopping, or dead.
+
+The fourth mechanism is autoscaler retry behavior. If worker creation fails, the autoscaler records the failure and uses cooldowns to avoid repeated rapid failures.
+
+The fifth mechanism is graceful scale-down. Workers are drained before removal, reducing the chance of interrupting active requests.
+
+Failure cases considered include:
+
+- worker container starts but gRPC server is not ready,
+
+- worker fails after registration,
+
+- worker becomes slow or overloaded,
+
+- agent fails to create a worker,
+
+- no workers are available,
+
+- request times out,
+
+- worker is removed during scale-down.
+
+There are still limitations. The master stores worker state and in-flight request state in memory. If the master crashes during a request, the current implementation may lose that request state. A production-grade version would require persistent queues, replicated masters, and durable request tracking.
+
+There are still limitations. The master stores worker state and in-flight request state in memory. If the master crashes during a request, the current implementation may lose that request state. A production-grade version would require persistent queues, replicated masters, and durable request tracking.
+
+4.8 Architecture Diagram
+
+
+
+
+
+5. Load Balancing and Scheduling Design
+
+5.1 Routing Problem Definition
+
+The routing problem in this system is to assign each incoming request to a worker that can process it quickly. This decision sits on the path of request handling, so the router must make a choice with low overhead while still considering worker health and current load. In practice, a worker is considered routable only if it is healthy and has not exceeded the configured concurrency threshold. This prevents the master from forwarding work to unavailable or saturated workers.
+
+Routing is more challenging for LLM workloads than for traditional web traffic because requests are not uniform. Some prompts are short and finish quickly, while others involve retrieval, long context windows, or extended token generation, which increases compute time significantly. If the router ignores this variability, one worker can become overloaded with expensive requests while others remain underused. Therefore, the design aims to balance three goals at once: fast decision making, fair distribution of work, and protection against overload.
+
+Routing Requirement
+
+
+Why It Matters
+
+Low-latency decision
+
+
+The master must choose a worker immediately so routing does not become a bottleneck itself.
+
+Health awareness
+
+
+Unhealthy or draining workers should not receive new traffic, which improves reliability.
+
+Load awareness
+
+
+Workers with too many active requests should be avoided to reduce queueing delay and timeouts.
+
+Fairness
+
+
+Requests should be spread across available workers so cluster resources are used efficiently.
+
+5.2 Implemented Strategies
+
+The router currently supports effective strategies that are suitable for a distributed inference system. Each strategy offers a different trade off between implementation simplicity, fairness, and sensitivity to workload imbalance. The two most relevant choices for this project are least connections and round robin.
+
+Strategy
+
+
+How It Works
+
+
+Best Use Case
+
+
+Strength
+
+
+Weakness
+
+Least Connections
+
+
+Selects the healthy worker with the smallest number of active requests.
+
+
+Variable-duration inference tasks where request cost differs significantly.
+
+
+Adapts dynamically to uneven workloads and helps prevent hot spots.
+
+
+Depends on accurate tracking of active requests and does not directly measure latency.
+
+Round Robin
+
+
+Cycles through healthy workers in a fixed sequence and assigns each new request to the next worker.
+
+
+Uniform workloads where requests take roughly the same time.
+
+
+Very simple, predictable, and fair in balanced environments.
+
+
+Can overload a worker if one assigned request takes much longer than others.
+
+
+
+The default router behavior uses least connections because it better reflects actual pressure on the cluster. Inference requests can vary widely in prompt length, retrieval cost, and generation length, so counting active work is a more useful signal than simply rotating evenly. The implementation scans all workers, skips any worker that is not routable, and chooses the one with the minimum active request count. It also applies a hard guardrail by rejecting routing if the chosen worker has already reached the configured concurrency ceiling, which helps avoid runaway overload.
+
+    Least Connections
+
+    Random Routing
+
+    Least Response Time
+
+    Consistent Hashing
+
+    Priority Routing
+
+5.3 Strategy Comparison
+
+Admission control complements routing by deciding whether the system should accept more work at all. Even the best routing algorithm cannot help if every healthy worker is already busy. For that reason, the master estimates total safe capacity based on the number of healthy workers multiplied by the per-worker concurrency limit. Requests beyond that capacity are placed in a bounded queue, giving the system a short buffer during traffic bursts without allowing memory usage or waiting time to grow without limit.
+
+Parameter
+
+
+Default Value
+
+
+Purpose
+
+
+Effect on the System
+
+MaxConcurrencyPerWorker
+
+
+50
+
+
+Caps the number of simultaneous requests a healthy worker may process.
+
+
+Protects individual workers from excessive parallelism and high latency.
+
+MaxQueueSize
+
+
+500
+
+
+Limits how many requests may wait when all workers are busy.
+
+
+Prevents unbounded queue growth and memory pressure during bursts.
+
+QueueTimeout
+
+
+30 seconds
+
+
+Sets the maximum time a request may remain queued.
+
+
+Ensures clients receive a timely overload response instead of waiting indefinitely.
+
+
+
+This design improves resilience under heavy load. Instead of silently degrading until response times become unacceptable, the system sheds excess load in a controlled and transparent way. That behavior is especially important for interactive AI systems, because users benefit more from a clear overload message than from an extremely delayed or failed response after a long wait.
+
+5.4 Why Each Strategy Matters
+
+Priority handling introduces a lightweight quality-of-service mechanism into the worker. Requests are placed into an in-memory priority queue where premium users receive priority 0 and free-tier users receive priority 1. Because lower numeric values are processed first, premium requests are served ahead of free requests whenever both classes are waiting at the same time. This approach does not change the routing destination directly, but it improves perceived responsiveness for high-value traffic once requests arrive at a worker.
+
+User Tier
+
+
+Numeric Priority
+
+
+Scheduling Effect
+
+Pro / Premium
+
+
+0
+
+
+Processed first when competing with lower-priority queued requests.
+
+Free Tier
+
+
+1
+
+
+Processed after premium traffic when both are waiting.
+
+5.5 Dynamic Strategy Selection Under Load
+
+The coursework also considered several strategy extensions that are not yet enabled in the main router but are valuable for future improvement. These strategies would make the load balancer more adaptive to real-time system behavior, user identity, or session locality. They are especially useful if the cluster grows larger or if the workload becomes more heterogeneous over time.
+
+Future Strategy
+
+
+Core Idea
+
+
+Potential Benefit
+
+Random Routing
+
+
+Selects a healthy worker at random.
+
+
+Very low overhead and useful as a simple baseline for testing.
+
+Least Response Time
+
+
+Routes to the worker with the best recent latency measurements.
+
+
+Avoids persistently slow workers and adapts to performance degradation.
+
+Consistent Hashing
+
+
+Maps related sessions or users to the same worker when possible.
+
+
+Improves cache locality and session affinity for repeated requests.
+
+Priority Routing
+
+
+Applies user-tier decisions at the router before requests reach workers.
+
+
+Provides stronger end-to-end quality-of-service guarantees across the cluster.
+
+
+
+Among these options, least response time and priority-aware routing are the most practical next steps for this project. The first would let the system react to observed performance rather than only active request counts, while the second would move service differentiation earlier in the processing pipeline. Together, they would make the scheduling layer smarter, more responsive, and better aligned with real production-style requirements.
+
+6. Implementation Details
+
+6.1 Technology Stack
+
+Layer
+
+
+Technology
+
+
+Reason
+
+Master
+
+
+Go
+
+
+Strong concurrency model, simple HTTP server, good gRPC support.
+
+Worker
+
+
+Python
+
+
+Convenient model/RAG integration and fast prototyping.
+
+Internal RPC
+
+
+gRPC / Protocol Buffers
+
+
+Typed, efficient, persistent communication for the hot path.
+
+Inference
+
+
+Ollama
+
+
+Local LLM runtime with HTTP API and model selection through environment variables.
+
+RAG
+
+
+ChromaDB
+
+
+Vector database service for storing and retrieving document chunks.
+
+Deployment
+
+
+Docker
+
+
+Workers can be created, labeled, restarted, and removed by agents.
+
+Monitoring
+
+
+Bubble Tea TUI and metrics collector
+
+
+Live view of cluster behavior and autoscaler decisions.
+
+
+
+6.2 Master Node Implementation
+
+The Master node is the central coordinator of the entire system. It is implemented in Go and is responsible for receiving client requests, selecting workers, forwarding requests to workers, tracking request state, monitoring worker health, and managing autoscaling.
+
+The Master starts from master/main.go. In this file, the system first creates a router using:
+
+router := lib.NewRouter()
+
+The router is the main in memory structure that stores the current cluster state. After creating the router, the Master starts the HTTP server using:
+
+go lib.Serve(router)
+
+Then it starts the terminal dashboard using:
+
+tui.Run(router)
+
+This means the Master runs two major parts at the same time:
+
+    The HTTP server that receives API requests.
+
+    The TUI dashboard that shows live cluster status.
+
+The main HTTP server implementation is in master/lib/server.go. The Master exposes endpoints such as /chat, /agents/register, and /workers/ready.
+
+The most important endpoint is /chat. When a client sends a chat request, the Master performs the following steps:
+
+    Validates that the request method is POST.
+
+    Parses the JSON request body into a ChatRequest.
+
+    Records the request in the metrics collector.
+
+    Applies admission control to avoid accepting too many requests during overload.
+
+    Generates a unique request ID using UUID.
+
+    Send the request to the router.
+
+    Returns the worker response to the client.
+
+The request format is represented by this Go struct:
+
+type ChatRequest struct {
+
+    UserID string `json:"userId"`
+
+    Prompt string `json:"prompt"`
+
+    Tier   string `json:"tier"`
+
+}
+
+The response is represented as:
+
+type ChatResponse struct {
+
+    RequestID string `json:"requestId"`
+
+    Reply     string `json:"reply"`
+
+}
+
+The actual routing happens in master/lib/router.go. The router stores workers in a map:
+
+workers map[string]*Worker
+
+It also stores registered agents:
+
+agents map[string]*AgentInfo
+
+This allows the Master to know which workers are available and which agent owns each worker.
+
+The Master supports multiple worker selection strategies. In master/lib/strategy.go, two strategies are defined:
+
+StrategyRoundRobin
+
+StrategyLeastConnections

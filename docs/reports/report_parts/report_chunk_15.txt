@@ -1,0 +1,599 @@
+A.6 Start ChromaDB
+
+
+
+The vector database is located in:
+
+vector-db/
+
+
+
+Start it using Docker Compose:
+
+
+
+cd vector-db
+
+docker compose up -d --build
+
+
+
+This starts ChromaDB on:
+
+http://localhost:8000
+
+
+
+It also indexes the documents in:
+
+vector-db/embedded-docs/
+
+
+
+Return to the project root:
+
+cd ..
+
+
+
+A.7 Run the Master
+
+
+
+Open a terminal and run:
+
+cd master
+
+go run main.go
+
+The Master starts the HTTP server on:
+
+http://localhost:8080
+
+It also opens the terminal monitoring dashboard.
+
+
+
+ A.8 Run the Agent
+
+
+
+Open another terminal and run the Agent:
+
+cd agent
+
+go run . --master-url http://localhost:8080 --listen :9000 --advertise-host 127.0.0.1
+
+
+
+The Agent registers with the Master, starts or checks Ollama and ChromaDB, and becomes available to create Workers.
+
+The Agent listens to:
+
+http://localhost:9000
+
+
+
+A.9 Test the Chat Endpoint
+
+
+
+After the Master and Agent are running, the Agent should create or report Workers. Then send a chat request to the Master.
+
+
+
+Using curl:
+
+curl -X POST http://localhost:8080/chat \
+
+  -H "Content-Type: application/json" \
+
+  -d '{
+
+    "userId": "user-1",
+
+    "prompt": "What happened on D-Day?",
+
+    "tier": "pro"
+
+  }'
+
+
+
+
+
+
+
+Expected response format:
+
+{
+
+  "requestId": "generated-request-id",
+
+  "reply": "Generated answer from the worker"
+
+}
+
+
+
+You can also test this usingTUI of the client.
+
+SCREEBSHOT OF TUI OF CLIENT
+
+
+
+A.10 Optional: Run Stress Test
+
+
+
+The project includes stress testing scripts:
+
+stress_test.sh
+
+gradual_stress_test.sh
+
+
+
+These scripts can be used to send multiple requests and observe autoscaling behavior in the Master TUI.
+
+
+
+Example:
+
+./stress_test.sh
+
+Appendix B: API Documentation
+
+B.1 Master HTTP API
+
+Base URL:
+
+http://localhost:8080
+
+
+
+Endpoint
+
+
+Method
+
+
+Request Body / Parameters
+
+
+Success Response
+
+
+Description
+
+/chat
+
+
+POST
+
+
+userId, prompt, tier
+
+
+requestId, reply
+
+
+Receives a user prompt, routes it to a Worker, and returns the generated answer
+
+/agents/register
+
+
+POST
+
+
+agent_id, host, port, workers
+
+
+status
+
+
+Registers an Agent with the Master
+
+/workers/ready
+
+
+POST
+
+
+worker_id, address, agent_id, container_id
+
+
+status, worker_id
+
+
+Called by the Agent when a Worker is ready
+
+Master API Details
+
+Endpoint
+
+
+Example Request
+
+/chat
+
+
+{ "userId": "user-1", "prompt": "What happened on D-Day?", "tier": "pro" }
+
+/agents/register
+
+
+{ "agent_id": "agent-127.0.0.1-9000", "host": "127.0.0.1", "port": 9000, "workers": [] }
+
+/workers/ready
+
+
+{ "worker_id": "worker-1", "address": "127.0.0.1:50051", "agent_id": "agent-127.0.0.1-9000", "container_id": "abc123" }
+
+
+
+B.2 Agent HTTP API
+
+Base URL:
+
+http://localhost:9000
+
+Endpoint
+
+
+Method
+
+
+Request Body / Parameters
+
+
+Success Response
+
+
+Description
+
+/system/info
+
+
+GET
+
+
+None
+
+
+os, cpu_usage, memory_mb
+
+
+Returns CPU, memory, and OS information
+
+/workers/create
+
+
+POST
+
+
+callback_url, agent_id, optional env
+
+
+status, worker_id, address
+
+
+Creates a new Worker Docker container
+
+/workers/destroy
+
+
+DELETE
+
+
+Query parameter: worker_id
+
+
+status
+
+
+Removes a specific Worker container
+
+/workers/clean
+
+
+POST
+
+
+None
+
+
+removed
+
+
+Removes all Worker containers created from the configured image
+
+Agent API Details
+
+Endpoint
+
+
+Example Request
+
+/system/info
+
+
+No body
+
+/workers/create
+
+
+{ "callback_url": "http://localhost:8080/workers/ready", "agent_id": "agent-127.0.0.1-9000" }
+
+/workers/destroy
+
+
+/workers/destroy?worker_id=worker-agent-127.0.0.1-50051
+
+/workers/clean
+
+
+No body
+
+
+
+B.3 Worker gRPC API
+
+Defined in:
+
+proto/worker.proto
+
+Service
+
+
+RPC Method
+
+
+Request Message
+
+
+Response Message
+
+
+Description
+
+WorkerService
+
+
+Handle
+
+
+Request
+
+
+Response
+
+
+Processes a chat request and returns the generated reply
+
+WorkerService
+
+
+Ping
+
+
+PingRequest
+
+
+PingResponse
+
+
+Checks whether the Worker is alive
+
+
+
+
+
+
+
+Worker gRPC Messages
+
+Message
+
+
+Fields
+
+
+Description
+
+Request
+
+
+request_id, message, priority
+
+
+Sent by the Master to ask a Worker to process a prompt
+
+Response
+
+
+request_id, reply, queue_length, retries
+
+
+Returned by the Worker after processing the request
+
+PingRequest
+
+
+None
+
+
+Empty message used for health checking
+
+PingResponse
+
+
+status
+
+
+Returns Worker health status, usually "ok"
+
+B.4 Common Error Responses
+
+Component
+
+
+Endpoint
+
+
+Status Code
+
+
+Meaning
+
+Master
+
+
+/chat
+
+
+400
+
+
+Invalid JSON request
+
+Master
+
+
+/chat
+
+
+405
+
+
+Wrong HTTP method
+
+Master
+
+
+/chat
+
+
+503
+
+
+No Workers available or server overloaded
+
+Master
+
+
+/chat
+
+
+504
+
+
+Request timed out in queue
+
+Master
+
+
+/chat
+
+
+502
+
+
+Worker failed while processing
+
+Master
+
+
+/agents/register
+
+
+400
+
+
+Invalid Agent registration JSON
+
+Master
+
+
+/workers/ready
+
+
+400
+
+
+Invalid Worker-ready JSON
+
+Agent
+
+
+/workers/create
+
+
+405
+
+
+Wrong HTTP method
+
+Agent
+
+
+/workers/destroy
+
+
+400
+
+
+Missing worker_id parameter
+
+Agent
+
+
+/workers/destroy
+
+
+500
+
+
+Failed to remove Worker container
+
+
+
+Appendix C: important Code Snippets
+
+This appendix includes selected code snippets that represent the most important implementation parts of the project.
+
+
+
+C.1 Master Startup
+
+File:
+
+master/main.go
+
+func main() {
+
+    log.SetOutput(monitoring.NewStdLogWriter())
+
+    router := lib.NewRouter()
+
+
+
+    if router.WorkerCount() == 0 {
+
+        fmt.Println("no workers available at startup")
+
+    }
+
+
+
+    go lib.Serve(router)
+
+
+
+    if err := tui.Run(router); err != nil {
+
+        fmt.Printf("Error starting TUI: %v\n", err)
+
+    }
+
+}

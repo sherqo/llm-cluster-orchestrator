@@ -1,0 +1,599 @@
+The dashboard starts when the Master process starts. In master/main.go, the main function creates a Router and starts the server:
+
+router := lib.NewRouter()
+
+go lib.Serve(router)
+
+Then the TUI starts:
+
+if err := tui.Run(router); err != nil {
+
+    fmt.Printf("Error starting TUI: %v\n", err)
+
+}
+
+This means the Master HTTP server runs in the background, while the TUI runs in the foreground. The user can watch the cluster state while the Master continues accepting requests.
+
+The TUI program is created in master/tui/model.go:
+
+func Run(router *lib.Router) error {
+
+    p := tea.NewProgram(
+
+        NewModel(router),
+
+        tea.WithAltScreen(),
+
+        tea.WithMouseCellMotion(),
+
+    )
+
+    _, err := p.Run()
+
+    return err
+
+}
+
+The option:
+
+tea.WithAltScreen()
+
+makes the dashboard use a full-screen terminal mode. This prevents normal terminal output from mixing with the dashboard layout.
+
+The option:
+
+tea.WithMouseCellMotion()
+
+enables mouse support for terminal interaction.
+
+
+
+TUI Architecture
+
+The dashboard follows the Bubble Tea model-view-update architecture.
+
+Part
+
+
+Role
+
+Model
+
+
+Stores dashboard state
+
+Update
+
+
+Handles keyboard input, refresh events, and window resizing
+
+View
+
+
+Renders the dashboard screen
+
+
+
+The main dashboard model is defined in master/tui/model.go:
+
+type model struct {
+
+    router     *lib.Router
+
+    start      time.Time
+
+    activeTab  tab
+
+    selected   int
+
+    inputMode  string
+
+    inputValue string
+
+    status     string
+
+    lastError  string
+
+    snap       snapshot
+
+    width      int
+
+    height     int
+
+    tickEvery  time.Duration
+
+}
+
+The most important field is:
+
+router *lib.Router
+
+This gives the dashboard direct access to the Master’s current Workers, Agents, routing strategy, autoscaler state, and in-flight requests.
+
+The snap field stores the latest snapshot of the system. Instead of reading data continuously while rendering, the dashboard periodically collects a snapshot and renders that stable snapshot.
+
+
+
+Automatic Refreshing
+
+The dashboard refreshes automatically. The refresh interval is set in NewModel(...):
+
+tickEvery: 700 * time.Millisecond
+
+This means the dashboard updates roughly every 0.7 seconds.
+
+The refresh process works as follows:
+
+    Bubble Tea sends a periodic tick message.
+
+    The dashboard calls fetchSnapshotCmd().
+
+    A new system snapshot is collected.
+
+    The model stores the new snapshot.
+
+    The screen is re-rendered.
+
+The snapshot collection function gathers data from several parts of the Master:
+
+workers := m.router.WorkersSnapshot()
+
+agents := m.router.AgentsSnapshot()
+
+inflight := m.router.InFlightSnapshot()
+
+logs := monitoring.LogSnapshot(500)
+
+events := monitoring.EventsSnapshot(500)
+
+recent := m.router.InFlightRecent(300)
+
+strategy := m.router.Strategy()
+
+autoscaling := m.router.AutoscalerSnapshot()
+
+startupStats := m.router.GetStartupStats()
+
+This gives the dashboard a complete live view of the cluster.
+
+
+
+Dashboard Tabs
+
+The TUI contains multiple tabs. The tab labels are defined in master/tui/model.go:
+
+var tabLabels = []string{
+
+    "Workers",
+
+    "Agents",
+
+    "In-Flight",
+
+    "Logs",
+
+    "Stats",
+
+    "AutoScale",
+
+    "Events",
+
+}
+
+Each tab focuses on a different part of the system.
+
+
+
+Tab
+
+
+Purpose
+
+Workers
+
+
+Displays all Workers and their states
+
+Agents
+
+
+Displays registered Agents and their Workers
+
+In-Flight
+
+
+Displays active and recently completed requests
+
+Logs
+
+
+Displays internal debug/system logs
+
+Stats
+
+
+Displays cluster-level statistics
+
+AutoScale
+
+
+Displays autoscaling metrics and decisions
+
+Events
+
+
+Displays important system notifications
+
+
+
+Workers Tab
+
+The Workers tab shows all Workers currently registered in the Master.
+
+The information comes from:
+
+m.router.WorkersSnapshot()
+
+Each Worker snapshot contains:
+
+type WorkerSnapshot struct {
+
+    ID             string
+
+    Addr           string
+
+    Status         WorkerStatus
+
+    Lifecycle      LifecycleState
+
+    Failures       int64
+
+    Successes      int64
+
+    ActiveRequests int64
+
+    AgentID        string
+
+}
+
+The Workers tab displays:
+
+Field
+
+
+Description
+
+ID
+
+
+Unique Worker ID
+
+Address
+
+
+gRPC address of the Worker
+
+State
+
+
+Current Worker lifecycle state
+
+Active
+
+
+Number of active requests
+
+Agent
+
+
+Agent that created or owns the Worker
+
+
+
+
+
+Worker lifecycle state is especially important. The Worker can be in one of several states:
+
+State
+
+
+Meaning
+
+STARTING
+
+
+Worker container was created but gRPC is not ready yet
+
+WARMING
+
+
+Worker is connected but still preparing
+
+HEALTHY
+
+
+Worker is ready to receive requests
+
+DRAINING
+
+
+Worker should not receive new requests
+
+STOPPING
+
+
+Worker is being shut down
+
+DEAD
+
+
+Worker has been removed or is no longer usable
+
+
+
+Only Workers in the HEALTHY state are used for routing new chat requests.
+
+The Worker’s tab is useful for quickly checking whether the cluster has enough available Workers and whether any Workers are stuck, overloaded, or draining.
+
+
+
+
+
+Agents Tab
+
+The Agents tab shows the Agents that have registered with the Master.
+
+Agent data comes from:
+
+m.router.AgentsSnapshot()
+
+Each Agent snapshot contains:
+
+type AgentSnapshot struct {
+
+    AgentID     string
+
+    Host        string
+
+    Port        int
+
+    WorkerCount int
+
+    AddedAt     time.Time
+
+}
+
+
+
+The Agents tab displays:
+
+Field
+
+
+Description
+
+Agent ID
+
+
+Unique identifier of the Agent
+
+Address
+
+
+Host and port of the Agent
+
+Workers
+
+
+Number of Workers owned by the Agent
+
+Uptime
+
+
+How long the Agent has been registered
+
+This tab also shows Workers grouped by Agent. This helps identify how Workers are distributed across machines.
+
+For example, if one Agent has five Workers and another Agent has zero Workers, the user can immediately see that the workload capacity is not evenly distributed.
+
+
+
+In-Flight Tab
+
+The In-Flight tab shows requests currently being processed by Workers.
+
+The in-flight request tracking is implemented in:
+
+master/monitoring/inflight.go
+
+When the Master routes a request to a Worker, it records the request using:
+
+r.AddInFlight(requestID, worker.addr)
+
+This stores:
+
+type InFlight struct {
+
+    RequestID string
+
+    Worker    string
+
+    StartedAt time.Time
+
+}
+
+When the Worker returns a response, the request is removed:
+
+r.RemoveInFlight(requestID)
+
+At that point, it is saved as a completed request:
+
+type CompletedFlight struct {
+
+    RequestID string
+
+    Worker    string
+
+    StartedAt time.Time
+
+    EndedAt   time.Time
+
+    Duration  time.Duration
+
+}
+
+The In-Flight tab displays:
+
+Field
+
+
+Description
+
+Request ID
+
+
+Unique request ID generated by the Master
+
+Worker
+
+
+Worker currently handling the request
+
+Elapsed
+
+
+How long the request has been running
+
+It also displays recent completed requests and their durations. This is useful for detecting slow requests and comparing Worker response times.
+
+Logs Tab
+
+The Logs tab shows internal system logs.
+
+Logs are managed by:
+
+master/monitoring/verbose.go
+
+The project does not simply print all logs directly to the terminal, because direct printing would disturb the TUI layout. Instead, logs are stored in memory and rendered inside the dashboard.
+
+The Master redirects standard Go logs into the monitoring system using:
+
+log.SetOutput(monitoring.NewStdLogWriter())
+
+Each log entry has:
+
+type LogEntry struct {
+
+    Time  time.Time
+
+    Place string
+
+    Msg   string
+
+}
+
+This allows logs to be displayed with:
+
+Field
+
+
+Description
+
+Time
+
+
+Time the log was created
+
+Place
+
+
+Component or module that generated the log
+
+Message
+
+
+Log message
+
+The Logs tab can show messages from areas such as:
+
+    Server startup
+
+    Request routing
+
+    Worker registration
+
+    Worker health checks
+
+    Autoscaler decisions
+
+    Agent callbacks
+
+    Errors and warnings
+
+This makes debugging easier because logs are available directly inside the TUI.
+
+Stats Tab
+
+The Stats tab gives a cluster-level summary.
+
+It displays information such as:
+
+Metric
+
+
+Meaning
+
+Total Workers
+
+
+Total number of Workers known by the Master
+
+Healthy Workers
+
+
+Workers available for routing
+
+Starting/Warming Workers
+
+
+Workers that are not ready yet
+
+Draining Workers
+
+
+Workers being removed or excluded from routing
+
+Agents
+
+
+Number of registered Agents
+
+In-Flight
+
+
+Number of currently active requests
+
+Active Requests
+
+
+Total active requests across all Workers
+
+Strategy
+
+
+Current routing strategy
+
+Uptime
+
+
+How long the dashboard has been running
+
+Average Latency
+
+
+Average duration of recent completed requests
+
+P95 Latency
+
+
+95th percentile latency of recent requests

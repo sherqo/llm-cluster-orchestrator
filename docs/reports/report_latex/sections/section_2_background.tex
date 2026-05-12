@@ -1,0 +1,54 @@
+\section{Background and Wider Reading}
+
+\subsection{Distributed Computing Concepts}
+A distributed system is a collection of independent computers that cooperate over a network and appear to users as a single service. Instead of placing all work on one machine, computation is divided across nodes. Each node may run a process, store part of the data, execute tasks, or coordinate other nodes. This improves scalability and availability, but it also introduces communication delays, partial failures, and coordination problems.
+
+The most important idea in distributed computing is that failure is partial. In a single-process program, a crash is usually obvious. In a distributed system, one node can fail while others continue running, a network link can become slow, or a message can be delayed without being lost. Because of this, distributed systems usually need health checks, timeouts, retries, logging, and mechanisms for deciding which nodes are currently safe to use.
+
+Common distributed-computing terms include nodes, workers, coordinators, queues, replicas, messages, RPC calls, consistency, availability, and fault tolerance. A node is a machine or container that participates in the system. A worker performs actual computation. A coordinator assigns work or tracks state. Replication means keeping multiple copies of a service or data item to improve availability. A queue stores work temporarily when requests arrive faster than workers can process them.
+
+\subsection{Load Balancing in Distributed Systems}
+Load balancing is the process of distributing incoming requests across multiple backend nodes. The goal is to prevent one node from becoming overloaded while other nodes are idle. A good load balancer improves throughput, reduces average latency, and protects the service from sudden bursts of traffic.
+
+\subsection{GPU Cluster Task Distribution}
+GPU cluster task distribution refers to assigning compute-heavy jobs to a group of machines that contain GPUs or other accelerators. GPUs are effective for parallel numerical workloads because they can perform many matrix operations at the same time. Modern deep-learning inference and training workloads often depend on GPUs because neural networks require many tensor operations.
+
+Task distribution can be horizontal or parallel. Horizontal distribution sends different requests to different workers. Parallel distribution splits one large computation across multiple devices. Data parallelism processes multiple independent examples at the same time.
+
+\subsection{Large Language Model Inference Workloads}
+LLM inference is the process of using a trained language model to generate text from an input prompt. Unlike a normal web request, an LLM request can be slow and resource-intensive.
+
+LLM workloads are hard to balance because requests are not equal. A short question may finish quickly, while a long prompt with a long answer may use much more computation. The same service may also receive bursts of traffic, causing queues to form. This makes metrics such as active requests, queue depth, latency, throughput, and error rate important for controlling the system.
+
+Another important concept is the context window. The context window is the maximum amount of text that the model can consider at once. Longer context can improve answer quality when relevant information is included, but it also increases memory use and processing time. Systems that serve LLMs must therefore manage prompt size carefully.
+
+\subsection{Retrieval-Augmented Generation}
+Retrieval-Augmented Generation, called RAG, combines information retrieval with text generation. The main idea is to retrieve relevant external documents before asking the language model to answer. The retrieved text is placed into the prompt as context, so the model can generate an answer using information that may not be stored in its parameters. The original RAG work describes this approach as a way to improve knowledge-intensive NLP tasks by combining parametric model knowledge with retrieved non-parametric knowledge.
+
+\subsection{Fault Tolerance and Autoscaling}
+Fault tolerance means that a system continues to provide acceptable service even when some components fail. Distributed systems must expect failures because nodes can crash, containers can stop, networks can partition, disks can fill, and requests can time out. A fault-tolerant design assumes that failures will happen and limits their impact.
+
+Common fault-tolerance mechanisms include health checks, heartbeats, timeouts, retries, circuit breakers, replication, graceful shutdown, and request idempotency. A health check asks whether a component is alive and ready. A timeout prevents one slow operation from blocking forever. A retry attempts the operation again, usually on another node or after a delay. A circuit breaker stops sending requests to a component that is failing repeatedly.
+
+Autoscaling is the process of changing the amount of compute capacity based on demand. Horizontal autoscaling adds or removes replicas, while vertical scaling changes the resources assigned to existing replicas.
+
+\subsection{Related Technologies and Systems}
+Several technologies commonly appear in distributed LLM-serving systems. They are not concepts by themselves, but they support the practical implementation of the concepts discussed above.
+
+\begin{table}[H]
+  \centering
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabularx}{\textwidth}{@{}lX@{}}
+    \toprule
+    \textbf{Technology or system type} & \textbf{Conceptual role} \\
+    \midrule
+    RPC frameworks such as gRPC & Allow services on different machines to call defined methods using structured messages. \\
+    Containers such as Docker & Package an application with its dependencies into an isolated unit that can run consistently across environments. Containers are useful for deploying many workers on the same host. \\
+    Vector databases & Store embeddings and support similarity search for retrieval workflows. They are widely used in RAG. \\
+    Local or hosted LLM runtimes & Expose model inference through an API. A runtime receives a prompt, executes the model, and returns generated text. \\
+    Monitoring and observability tools & Collect metrics, logs, and traces so can understand latency, errors, utilization, and system behavior during failures. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Together, these technologies support the practical goals of distributed LLM serving: distributing requests, isolating workers, monitoring system health, retrieving external knowledge, and adjusting capacity as demand changes.

@@ -1,0 +1,599 @@
+This tab is useful for quickly understanding the overall health of the cluster.
+
+
+
+AutoScale Tab
+
+The AutoScale tab displays autoscaling information.
+
+Autoscaling logic is implemented in:
+
+master/lib/autoscaler.go
+
+Metrics used by the autoscaler are implemented in:
+
+master/lib/metrics.go
+
+The TUI gets autoscaling information through:
+
+m.router.AutoscalerSnapshot()
+
+The autoscaler snapshot includes information such as:
+
+ScalingDecision
+
+DecisionReason
+
+DesiredWorkers
+
+CooldownRemaining
+
+LastScaleUp
+
+LastScaleDown
+
+RecentActions
+
+The AutoScale tab shows:
+
+Field
+
+
+Description
+
+Scaling decision
+
+
+Whether the autoscaler wants to scale up, scale down, or do nothing
+
+Decision reason
+
+
+Explanation for the current decision
+
+Desired workers
+
+
+Target number of Workers
+
+Cooldown remaining
+
+
+Time before another scaling action is allowed
+
+Last scale-up
+
+
+Last time Workers were added
+
+Last scale-down
+
+
+Last time Workers were removed
+
+Recent actions
+
+
+History of recent scaling changes
+
+This tab is useful because autoscaling decisions can be complex. For example, the system may not scale up immediately if it is still in a cooldown period. The AutoScale tab explains this behavior.
+
+
+
+Events Tab
+
+The Events tab shows important system notifications.
+
+Events are created using:
+
+monitoring.Event(place, msg)
+
+Events are stored separately from normal logs. This makes the Events tab cleaner and focused on important cluster changes.
+
+Examples of events include:
+
+    Master server started.
+
+    Agent registered.
+
+    Worker registered through callback.
+
+    Worker re-adopted after Agent restart.
+
+    Autoscaler started.
+
+    Scale-up or scale-down action occurred.
+
+    Worker failed health check.
+
+The Events tab is useful during demonstrations because it shows high-level system activity without all the lower-level debug details.
+
+
+
+
+
+Metrics Layer
+
+The metrics layer is implemented in:
+
+master/lib/metrics.go
+
+It collects and smooths cluster metrics. These metrics are used both by the dashboard and by the autoscaler.
+
+The main metrics structure is:
+
+type ClusterMetrics struct {
+
+    QueueDepth        float64
+
+    P95Latency        float64
+
+    WorkerUtilization float64
+
+    ErrorRate         float64
+
+    RequestsPerSec    float64
+
+    TotalWorkers      int
+
+    HealthyWorkers    int
+
+    InFlight          int
+
+    QueueSize         int
+
+    RPSTrend          float64
+
+    CollectedAt       time.Time
+
+}
+
+The metrics include:
+
+Metric
+
+
+Description
+
+Queue depth
+
+
+Number of queued or pending requests
+
+P95 latency
+
+
+95th percentile request latency
+
+Worker utilization
+
+
+Average Worker load
+
+Error rate
+
+
+Percentage of failed requests
+
+Requests per second
+
+
+Current throughput
+
+Total Workers
+
+
+Number of Workers in the system
+
+Healthy Workers
+
+
+Number of Workers available for routing
+
+In-flight
+
+
+Number of active requests
+
+Queue size
+
+
+Current admission queue size
+
+RPS trend
+
+
+Whether traffic is increasing or decreasing
+
+The metrics layer uses rolling windows and EWMA smoothing. EWMA stands for Exponentially Weighted Moving Average. It smooths noisy values so the dashboard and autoscaler do not overreact to short spikes.
+
+
+
+Connection Between Monitoring and Autoscaling
+
+The monitoring system is not only for display. It also supports autoscaling.
+
+The autoscaler uses monitored metrics to decide whether to add or remove Workers. For example:
+
+Condition
+
+
+Possible Autoscaler Action
+
+High worker utilization
+
+
+Add more Workers
+
+High P95 latency
+
+
+Add more Workers
+
+Queue depth increasing
+
+
+Add more Workers
+
+Low utilization for a sustained period
+
+
+Remove Workers
+
+High error rate
+
+
+Avoid scale-down
+
+Strong positive RPS trend
+
+
+Prewarm Workers
+
+This means the monitoring system is part of the control loop of the cluster. It observes the system, provides data to the autoscaler, and the autoscaler acts based on that data.
+
+
+
+
+
+Keyboard Controls
+
+The TUI supports keyboard controls for navigation and simple management.
+
+Key
+
+
+Action
+
+1
+
+
+Open Workers tab
+
+2
+
+
+Open Agents tab
+
+3
+
+
+Open In-Flight tab
+
+4
+
+
+Open Logs tab
+
+5
+
+
+Open Stats tab
+
+6
+
+
+Open AutoScale tab
+
+7
+
+
+Open Events tab
+
+r
+
+
+Refresh dashboard
+
+a
+
+
+Add Worker manually
+
+d
+
+
+Drain selected Worker
+
+x
+
+
+Remove selected Worker
+
+s
+
+
+Switch routing strategy
+
+z
+
+
+Zoom autoscaling history
+
+q or Ctrl+C
+
+
+Quit dashboard
+
+These controls make the dashboard more than just a display. It also provides basic administrative actions, such as draining or removing Workers and changing the routing strategy
+
+
+
+
+
+6.11 Code Structure
+
+The project is organized into separate directories, where each directory represents a major component of the distributed LLM cluster. This structure makes the system easier to understand, maintain, and extend because each component has a clear responsibility.
+
+The main project structure is:
+
+llm-cluster-orchestrator/
+
+│
+
+├── master/
+
+├── agent/
+
+├── worker/
+
+├── proto/
+
+├── vector-db/
+
+├── client/
+
+├── docs/
+
+├── Makefile
+
+├── docker-compose.yml
+
+└── README.md
+
+Each part of the codebase contributes to a specific layer of the system.
+
+
+
+master/ Directory
+
+The master/ directory contains the Master node, which acts as the central controller of the cluster.
+
+The Master is responsible for:
+
+    Receiving user chat requests.
+
+    Registering Agents.
+
+    Registering Workers.
+
+    Routing requests to Workers.
+
+    Tracking in-flight requests.
+
+    Monitoring Worker health.
+
+    Running the autoscaler.
+
+Displaying the TUI dashboard.
+
+Important files and folders inside master/ include:
+
+master/
+
+├── main.go
+
+├── lib/
+
+├── monitoring/
+
+├── tui/
+
+├── generated/
+
+├── db/
+
+├── go.mod
+
+└── README.md
+
+master/main.go
+
+This is the entry point of the Master node. It creates the router, starts the HTTP server, and launches the TUI dashboard.
+
+The main flow is:
+
+Create Router
+
+Start HTTP server
+
+Start TUI dashboard
+
+master/lib/
+
+This folder contains the core Master logic.
+
+Important files include:
+
+File
+
+
+Purpose
+
+server.go
+
+
+Defines HTTP endpoints such as /chat, /agents/register, and /workers/ready
+
+router.go
+
+
+Stores Workers and Agents, and handles request routing
+
+worker.go
+
+
+Represents a Worker and manages gRPC communication
+
+strategy.go
+
+
+Implements routing strategies such as least-connections and round-robin
+
+autoscaler.go
+
+
+Adds or removes Workers based on system load
+
+metrics.go
+
+
+Collects latency, utilization, error rate, and throughput metrics
+
+admission.go
+
+
+Controls request admission during overload
+
+admin.go
+
+
+Handles administrative Worker actions such as add, drain, and remove
+
+master/monitoring/
+
+This folder contains the monitoring utilities used by the dashboard.
+
+File
+
+
+Purpose
+
+verbose.go
+
+
+Stores logs and events in memory
+
+inflight.go
+
+
+Tracks active and completed requests
+
+master/tui/
+
+This folder contains the terminal dashboard implementation.
+
+File
+
+
+Purpose
+
+model.go
+
+
+Main Bubble Tea model and update loop
+
+views.go
+
+
+Renders Workers, Agents, Logs, Stats, and Events tabs
+
+autoscaling.go
+
+
+Renders autoscaling charts and decisions
+
+chrome.go
+
+
+Renders header, footer, and tab layout
+
+helpers.go
+
+
+Helper formatting functions
+
+master/generated/
+
+This folder contains generated Go code from the .proto files. The Master uses this code to communicate with Workers through gRPC.
+
+
+
+agent/ Directory
+
+The agent/ directory contains the Agent node, which runs on a machine that can host Worker containers.
+
+The Agent is responsible for:
+
+    Registering itself with the Master.
+
+    Starting or checking Ollama.
+
+    Starting or checking ChromaDB.
+
+    Creating Worker Docker containers.
+
+    Destroying Worker containers.
+
+    Reporting Worker readiness back to the Master.
+
+    Reporting surviving Workers after restart.
+
+Important files include:
+
+agent/
+
+├── server.go
+
+├── handlers.go
+
+├── docker.go
+
+├── ollama.go
+
+├── chroma.go
+
+├── utils.go
+
+├── types.go
+
+├── verbose.go
+
+├── go.mod
+
+└── README.md
+
+agent/server.go
+
+This is the Agent entry point. It reads configuration, starts required services, initializes Docker management, registers HTTP handlers, and registers the Agent with the Master.
+
+agent/handlers.go
+
+This file defines the Agent HTTP endpoints.
+
+Important endpoints include:
+
+Endpoint
+
+
+Purpose

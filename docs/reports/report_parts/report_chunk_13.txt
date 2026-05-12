@@ -1,0 +1,597 @@
+GPU memory fragmentation.
+
+    Model loading time.
+
+    CUDA driver behavior.
+
+    Thermal throttling.
+
+    Other processes using the GPU.
+
+A simple simulation cannot accurately capture all of these factors. Therefore, performance results from the simulation should be treated as approximate and not as exact production measurements.
+
+
+
+No GPU Isolation Between Workers
+
+In the current Docker-based Worker deployment, Workers are created as containers, but the code does not explicitly assign specific GPUs to specific containers.
+
+For example, the Docker creation logic in agent/docker.go creates containers using:
+
+ContainerCreate(...)
+
+and configures host networking, restart policy, environment variables, and labels. However, it does not configure Docker GPU device requests such as:
+
+--gpus
+
+NVIDIA_VISIBLE_DEVICES
+
+CUDA_VISIBLE_DEVICES
+
+This means the current implementation does not isolate GPU access per Worker. If multiple Workers use the same Ollama instance or same GPU, they may compete for GPU resources.
+
+
+
+Shared Ollama Instance Limitation
+
+The Worker documentation states that the current approach uses a shared Ollama instance on the machine. The Agent starts Ollama and passes its URL to Workers using:
+
+OLLAMA_URL
+
+This means multiple Workers may send inference requests to the same Ollama server.
+
+While this is simpler and easier to run locally, it limits GPU simulation accuracy. In a real GPU cluster, each Worker may need a dedicated GPU, a dedicated model instance, or a carefully controlled sharing strategy.
+
+With a shared Ollama instance:
+
+    Workers do not truly own independent GPU resources.
+
+    Multiple requests may queue inside Ollama.
+
+    GPU bottlenecks may appear as Worker latency.
+
+    The Master may think multiple Workers exist, even though they share the same inference backend.
+
+    Scaling Workers may not improve performance if the shared GPU is already saturated.
+
+This is an important limitation because adding more Worker containers does not always mean adding more real compute capacity.
+
+
+
+Worker Count Does Not Equal GPU Capacity
+
+The autoscaler can create more Worker containers when load increases. However, if all Workers use the same machine and the same Ollama backend, increasing Worker count may not increase actual LLM throughput.
+
+For example:
+
+1 Worker + 1 Ollama instance + 1 GPU
+
+and:
+
+5 Workers + 1 Ollama instance + 1 GPU
+
+may still be limited by the same single GPU.
+
+This means Worker count is only an approximation of capacity. In a real GPU-aware system, capacity should be based on:
+
+    Number of GPUs.
+
+    Free GPU memory.
+
+    Model memory requirements.
+
+    Current GPU utilization.
+
+    Inference queue length.
+
+    Token generation throughput.
+
+
+
+Autoscaler Uses General Metrics, Not GPU Metrics
+
+The autoscaler currently uses cluster-level metrics such as:
+
+Worker utilization
+
+P95 latency
+
+Queue depth
+
+Error rate
+
+Requests per second
+
+RPS trend
+
+These are useful for general scaling, but they do not directly measure GPU load.
+
+For example, high latency may be caused by GPU saturation, but the system cannot confirm that because it does not read GPU utilization. Similarly, low Worker utilization may not mean the GPU is free if Ollama is busy with internal model execution.
+
+As a result, autoscaling decisions are based on indirect symptoms rather than direct GPU measurements.
+
+
+
+No Model Memory Awareness
+
+Different LLMs require different amounts of memory. A small model such as:
+
+smollm:135m
+
+requires far less memory than a larger model.
+
+The current implementation allows the model to be configured using:
+
+OLLAMA_MODEL
+
+However, the system does not estimate whether the selected model can fit into the available GPU memory.
+
+This means the system does not currently prevent cases where:
+
+    A model is too large for the GPU.
+
+    Too many Workers are created for the available VRAM.
+
+    Multiple model instances compete for memory.
+
+    Ollama fails because the model cannot be loaded efficiently.
+
+
+
+Limited Performance Accuracy
+
+Because GPU behavior is not directly measured or controlled, the system’s performance results are limited. Metrics such as response time and throughput are still useful, but they should be interpreted as system-level behavior, not exact GPU performance.
+
+For example, a stress test may show increasing latency under load. This indicates that the system is becoming overloaded, but it does not prove exactly whether the bottleneck is:
+
+    GPU inference time.
+
+    Ollama internal queueing.
+
+    Worker concurrency.
+
+    CPU usage.
+
+    Memory pressure.
+
+    Network overhead.
+
+    Docker overhead.
+
+Without GPU-specific metrics, the exact cause cannot be fully identified.
+
+    No physical GPUs were used.
+
+    Inference performance reflects CPU‑based execution rather than true GPU throughput.
+
+    Autoscaling behavior is correct, but absolute performance figures are not production‑representative.
+
+
+
+11.3 LLM Model Size Limitations
+
+The system uses a local LLM runtime through Ollama, and the default model configured in the Worker is:
+
+OLLAMA_MODEL = "smollm:135m"
+
+This is a very small model compared to modern large language models. It was selected because it is lightweight, easier to run locally, and suitable for demonstrating the project flow without requiring powerful hardware.
+
+However, using a small model introduces several limitations.
+
+
+
+Limited Answer Quality
+
+Smaller models usually have weaker reasoning and language generation capabilities compared to larger models. As a result, the generated answers may be:
+
+    Less detailed.
+
+    Less accurate.
+
+    More repetitive.
+
+    Less fluent.
+
+    More likely to misunderstand complex prompts.
+
+This means the project can demonstrate the orchestration and RAG pipeline, but the answer quality may not match larger LLMs.
+
+
+
+Reduced Knowledge Capacity
+
+Small models contain fewer parameters, so they store less general knowledge. The RAG pipeline helps by adding external context from ChromaDB, but the model still needs enough reasoning ability to use that context correctly.
+
+For example, even if the RAG system retrieves the correct document, a small model may still:
+
+    Ignore part of the context.
+
+    Summarize it poorly.
+
+    Mix retrieved context with incorrect assumptions.
+
+    Produce an incomplete answer.
+
+
+
+Context Length Limitation
+
+Local models often have limited context windows. This means they can only process a limited amount of text at one time.
+
+Because of this, the project limits the amount of retrieved RAG text using:
+
+RAG_MAX_CHARS
+
+and limits generated output using:
+
+num_predict: 200
+
+This keeps inference faster, but it also means the model receives only short snippets from the retrieved documents. If the answer requires multiple long documents, the model may not receive enough information.
+
+
+
+Performance vs. Quality Trade-Off
+
+The small model improves speed and makes the project easier to run on local hardware. However, this comes at the cost of response quality.
+
+A larger model could produce better answers, but it would require:
+
+    More RAM.
+
+    More GPU memory.
+
+    Longer startup time.
+
+    Higher inference latency.
+
+    More powerful hardware.
+
+Therefore, the selected model reflects a trade-off between practicality and output quality.
+
+
+
+Hardware Limitations
+
+The project is intended to run locally, so the model size must match the available hardware. If a larger model is used, the system may experience:
+
+    Slow response times.
+
+    Ollama timeouts.
+
+    High CPU or GPU usage.
+
+    Memory exhaustion.
+
+    Failed model loading.
+
+The Worker includes a timeout setting:
+
+OLLAMA_TIMEOUT_SECONDS = 120
+
+If the model takes too long to respond, the Worker returns a timeout message instead of crashing.
+
+
+
+Effect on Scalability Results
+
+Model size also affects scalability testing. With a small model, requests may complete faster, which makes the system appear more responsive. With a larger model, each request may take much longer, increasing queue depth and latency.
+
+Therefore, scaling results depend heavily on the selected model. The same cluster may behave very differently when using:
+
+smollm:135m
+
+compared to a larger model such as:
+
+llama3
+
+mistral
+
+gemma
+
+Because of this, performance results should always mention which model was used.
+
+    Relatively small local models were used for practicality.
+
+    Larger models would introduce:
+
+    higher memory usage,
+
+    longer startup times,
+
+    more pronounced scaling pressure.
+
+    These effects are not fully explored in this implementation.
+
+
+
+11.4 Single Master Limitation
+
+The current implementation uses a single Master node as the central controller of the system. The Master is responsible for receiving client requests, registering Agents and Workers, routing requests, tracking in-flight requests, collecting metrics, running the autoscaler, and displaying the monitoring dashboard.
+
+This design makes the system easier to implement and test, but it introduces an important limitation: the Master is a single point of failure.
+
+
+
+Master as the Central Coordinator
+
+In the current architecture, all major control decisions pass through the Master.
+
+The Master handles:
+
+    Client /chat requests.
+
+    Agent registration through /agents/register.
+
+    Worker readiness callbacks through /workers/ready.
+
+    Worker selection and routing.
+
+    In-flight request tracking.
+
+    Worker health checking.
+
+    Metrics collection.
+
+    Autoscaling decisions.
+
+    TUI dashboard state.
+
+Because all of these responsibilities are centralized, the system depends heavily on the Master remaining alive and reachable.
+
+
+
+Single Point of Failure
+
+If the Master process crashes or becomes unreachable, the cluster cannot operate normally.
+
+For example:
+
+    Clients cannot send new /chat requests.
+
+    Agents cannot register or report Workers.
+
+    New Workers cannot be added to the Master’s registry.
+
+    Worker health checks stop.
+
+    Autoscaling decisions stop.
+
+    The TUI dashboard stops updating.
+
+    In-flight request tracking is lost.
+
+Even if existing Worker containers are still running, the system cannot route new requests to them because routing is controlled by the Master.
+
+
+
+In-Memory State Limitation
+
+The Master stores important runtime information in memory. For example, the Router keeps maps of Workers and Agents:
+
+workers map[string]*Worker
+
+agents map[string]*AgentInfo
+
+It also keeps in-flight request tracking, metrics snapshots, autoscaler state, and startup statistics.
+
+Because this information is mostly in memory, if the Master restarts, it may lose:
+
+    Registered Workers.
+
+    Registered Agents.
+
+    Current in-flight requests.
+
+    Recent logs and events.
+
+    Recent metrics.
+
+    Autoscaling history.
+
+Some recovery exists through Agent registration. When an Agent restarts or registers again, it can report surviving Workers to the Master. However, this does not fully solve Master failure because the Master itself does not automatically restore all previous runtime state.
+
+
+
+No Leader Election or Replication
+
+The current implementation does not include multiple Master nodes. There is no leader election system, no replicated Master state, and no standby Master that can take over automatically.
+
+In a production distributed system, high availability is usually achieved using mechanisms such as:
+
+    Leader election.
+
+    State replication.
+
+    Distributed consensus.
+
+    Persistent shared storage.
+
+    Health-checked failover.
+
+    Load balancers in front of multiple controllers.
+
+This project does not currently include those mechanisms. Therefore, if the Master fails, another Master cannot automatically continue from the same state.
+
+
+
+Impact on Autoscaling
+
+Autoscaling is also centralized in the Master. The autoscaler runs inside the Master process and depends on metrics collected from the Router.
+
+If the Master goes down:
+
+    No new Workers can be created.
+
+    Low-load Workers cannot be removed.
+
+    Worker health changes are not detected.
+
+    Agent failures are not tracked.
+
+    Scaling cooldowns and history are lost.
+
+This means the cluster loses its self-management ability while the Master is unavailable.
+
+
+
+Impact on Monitoring
+
+The TUI dashboard is also part of the Master process. Since the dashboard is launched from master/main.go, if the Master process exits, monitoring stops as well.
+
+This means there is no independent monitoring service in the current implementation. Logs, events, and metrics are mainly stored in memory and shown through the Master TUI.
+
+
+
+Recovery Behavior
+
+The current design provides partial recovery through Agents and Workers.
+
+If Workers are still running after a Master restart, the Agent can report them during registration using the workers field. The Master can then reconnect to those Workers and re-adopt them.
+
+However, this recovery depends on:
+
+    The Agent being alive.
+
+    The Agent registering again.
+
+    The Worker containers still running.
+
+    The Master successfully reconnecting to each Worker.
+
+This is helpful, but it is not the same as full Master high availability.
+
+    The system relies on a single master node.
+
+    If the master fails:
+
+    worker state,
+
+    in‑flight request tracking,
+
+    autoscaler state are temporarily lost.
+
+    A production system would require master replication or leader election.
+
+
+
+11.5 Network and Deployment Limitations
+
+The current implementation was mainly designed and tested in a local or small-scale environment. Because of this, there are some limitations related to networking, deployment portability, and production readiness.
+
+The system can demonstrate the main distributed architecture, but it does not yet include all networking and deployment features needed for a large production cluster.
+
+
+
+Local Network Assumptions
+
+The system assumes that the Master, Agents, and Workers can reach each other through simple host and port addresses.
+
+For example:
+
+Master → Agent: http://host:9000
+
+Master → Worker: host:50051
+
+Agent → Master: http://host:8080
+
+This works well in local testing or on machines connected to the same network. However, in real deployments, networking may be more complex due to firewalls, NAT, private IPs, container networks, cloud security groups, or service discovery requirements.
+
+If the Master cannot reach the advertised Agent or Worker address, registration and request routing may fail.
+
+
+
+Manual Address Configuration
+
+Agents use an advertised host and port so the Master knows how to reach them.
+
+The Agent configuration includes:
+
+--advertise-host
+
+--advertise-port
+
+If these values are incorrect, the Master may store an unreachable address.
+
+For example, if an Agent advertises:
+
+127.0.0.1
+
+but the Master is running on a different machine, the Master will try to connect to its own localhost instead of the Agent machine. This would fail in a real multi-machine setup.
+
+Therefore, correct network configuration is important for deployment.
+
+
+
+Host Networking Dependency
+
+Worker containers are started using Docker host networking:
+
+NetworkMode: container.NetworkMode("host")
+
+This simplifies local communication because Workers can bind directly to host ports. However, it also introduces limitations:
+
+    Host networking is less isolated than Docker bridge networking.
+
+    It can behave differently on different operating systems.
+
+    It may not be supported in the same way on all Docker Desktop environments.
+
+    It increases the risk of port conflicts.
+
+    It makes deployment less portable.
+
+In production, a more robust solution might use bridge networking, Kubernetes services, or a service discovery system.
+
+
+
+No Service Discovery
+
+The current implementation does not include automatic service discovery. The Master learns about Agents only when they register, and it learns about Workers only when Agents report them.
+
+There is no external registry such as:
+
+Consul
+
+etcd
+
+Kubernetes Service Discovery
+
+DNS-based discovery
+
+This means components must know the correct addresses ahead of time. For small setups this is acceptable, but for larger clusters it becomes harder to manage.
+
+
+
+No Secure Communication
+
+The current HTTP and gRPC communication uses plain, unsecured connections.
+
+For example, the Master connects to Workers using:
+
+grpc.WithTransportCredentials(insecure.NewCredentials())
+
+This means gRPC communication is not encrypted.
+
+Also, the HTTP endpoints do not include authentication or authorization. Any client that can reach the endpoints may potentially call:
+
+/chat
+
+/workers/create
+
+/workers/destroy
+
+/workers/clean
+
+This is acceptable for a local prototype, but not suitable for production.
+
+A production deployment would need:
+
+    TLS encryption.
+
+    Authentication tokens.
+
+    Authorization rules.
+
+    Network access control.
+
+    Secure service-to-service communication.

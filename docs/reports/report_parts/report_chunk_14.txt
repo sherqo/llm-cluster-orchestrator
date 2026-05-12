@@ -1,0 +1,597 @@
+Firewall and Port Exposure Issues
+
+The system depends on several ports being open and reachable.
+
+Common ports include:
+
+Component
+
+
+Port
+
+Master HTTP server
+
+
+8080
+
+Agent HTTP server
+
+
+9000
+
+Worker gRPC servers
+
+
+50051-50150
+
+ChromaDB
+
+
+8000
+
+Ollama
+
+
+11434 or configured port
+
+If these ports are blocked by a firewall or already used by another process, the system may not work correctly.
+
+The Agent tries to find available Worker ports, but it cannot automatically solve firewall or cloud security group issues.
+
+
+
+Limited Deployment Automation
+
+The project includes Docker support for Workers and ChromaDB, but the full system is not packaged as a single production deployment.
+
+For example:
+
+    The Master is run manually with go run.
+
+    The Agent is run manually with command-line flags.
+
+    The Worker image must be built before Worker creation.
+
+    Ollama must be installed and available.
+
+    ChromaDB may need to be started separately.
+
+    Environment variables must be configured correctly.
+
+This is acceptable for a development project, but a production deployment would need more automation.
+
+Examples of possible improvements include:
+
+Docker Compose for all services
+
+Kubernetes manifests
+
+Helm charts
+
+Systemd service files
+
+CI/CD deployment scripts
+
+Container image registry
+
+
+
+No Cross-Machine Image Distribution
+
+The Agent creates Worker containers using a configured image, such as:
+
+llm-worker:latest
+
+This image must already exist on the Agent machine. In a local setup, this is usually done by running:
+
+docker build -t llm-worker:latest .
+
+However, in a multi-machine deployment, each Agent machine would need access to the same image.
+
+The current project does not automatically push or pull Worker images from a registry. This means image distribution must be handled manually.
+
+
+
+
+
+Scaling Across Machines Requires Manual Setup
+
+The system supports the concept of multiple Agents, but each Agent must be started and configured manually.
+
+For each Agent machine, the user must ensure:
+
+    Docker is installed.
+
+    Ollama is installed or reachable.
+
+    ChromaDB is installed or reachable.
+
+    The Worker Docker image exists.
+
+    Correct Master URL is configured.
+
+    Correct advertise host is configured.
+
+    Required ports are open.
+
+This means multi-machine deployment is possible in design, but still requires manual configuration.
+
+    All components communicate over a local network interface.
+
+    Real‑world issues such as:
+
+    network latency,
+
+    packet loss,
+
+    cross‑region deployment were not evaluated.
+
+    System behavior may differ in distributed cloud environments.
+
+
+
+11.6 RAG Accuracy Limitations
+
+The project includes a RAG pipeline to improve LLM answers using external documents stored in ChromaDB. However, the current RAG implementation has several accuracy limitations. These limitations come from the size of the document set, the retrieval method, the amount of context passed to the model, and the ability of the LLM to correctly use the retrieved information.
+
+Although RAG improves the system compared to using the model alone, it does not guarantee that every answer will be correct.
+
+
+
+Limited Document Collection
+
+The system retrieves information from the documents stored in:
+
+vector-db/embedded-docs/
+
+In the current implementation, these documents mainly contain sample World War II topics, such as D-Day, Pearl Harbor, Stalingrad, the Holocaust, and Allied/Axis powers.
+
+This means the RAG system can only provide useful context for topics that exist in the document collection.
+
+If the user asks about something outside the available documents, the RAG system may not retrieve helpful information.
+
+For example, if the user asks:
+
+Explain quantum computing.
+
+the current document set will not contain relevant information. In that case, the Worker may fall back to the model’s general knowledge, or it may retrieve unrelated documents.
+
+
+
+Simple Keyword-Based Retrieval
+
+Although the project uses ChromaDB as a vector database, the current Worker retrieval logic in worker/rag.py loads documents from ChromaDB and then ranks them using a simple keyword-count method.
+
+The scoring function counts how often prompt terms appear in each document:
+
+def _score(doc: str, terms: list[str]) -> int:
+
+    text = doc.lower()
+
+    return sum(text.count(t) for t in terms if t)
+
+This approach is simple and fast, but it has accuracy limitations.
+
+It may fail when:
+
+    The user uses different words than the document.
+
+    The question requires semantic understanding.
+
+    Relevant documents do not share exact keywords.
+
+    Common words accidentally increase the score of irrelevant documents.
+
+    The query is vague or short.
+
+For example, a query about “Normandy invasion” may be relevant to D-Day, but if the document uses different wording, keyword matching may not rank it correctly.
+
+A full semantic vector search would be more accurate because it would compare meaning, not only word overlap.
+
+
+
+Limited Context Size
+
+The retrieval system limits how much text is passed to the model.
+
+The configuration includes:
+
+TOP_K = int(os.getenv("RAG_TOP_K", "2"))
+
+MAX_CHUNK_CHARS = int(os.getenv("RAG_MAX_CHARS", "150"))
+
+By default, the Worker retrieves only:
+
+2 documents/snippets
+
+150 characters from each snippet
+
+This keeps the prompt short and inference faster, but it may remove important details. Some questions require more context than 150 characters per document.
+
+For example, if a document contains a long explanation, the retrieved snippet may include only the beginning and miss the specific detail needed to answer the question.
+
+
+
+No Advanced Chunking Strategy
+
+The initialization script stores whole documents in ChromaDB. The current implementation does not split documents into smaller semantic chunks before retrieval.
+
+This can reduce retrieval accuracy because:
+
+    Long documents may contain multiple topics.
+
+    Relevant information may appear in the middle or end of a document.
+
+    The retriever may truncate the beginning of the document and miss the useful part.
+
+    Smaller chunks usually provide more precise context.
+
+A more advanced RAG system would split documents into chunks, embed each chunk separately, and retrieve the most relevant chunks instead of whole documents.
+
+
+
+No Source Citation in Final Answer
+
+The Worker passes retrieved context to the model, but the final answer does not include source citations or document IDs.
+
+This means the user cannot easily verify which document was used to produce the answer.
+
+For academic or production use, it would be better to return:
+
+    The generated answer.
+
+    Retrieved document IDs.
+
+    Snippets used as evidence.
+
+    Similarity scores or ranks.
+
+This would make the system more transparent and easier to evaluate.
+
+
+
+Model May Ignore or Misuse Context
+
+Even when the correct context is retrieved, the LLM may not always use it correctly.
+
+The prompt tells the model:
+
+Use this context to answer the question. Give a direct answer only.
+
+However, small local models may still:
+
+    Ignore the context.
+
+    Misread the context.
+
+    Combine context with incorrect prior knowledge.
+
+    Generate unsupported details.
+
+    Produce incomplete answers.
+
+This is especially possible because the default model is small:
+
+smollm:135m
+
+Therefore, RAG accuracy depends not only on retrieval quality, but also on the model’s ability to understand and use the retrieved context.
+
+
+
+Fallback Can Return Generic Answers
+
+If RAG fails, the system returns an empty context:
+
+if not DOCUMENTS:
+
+    return ""
+
+Then the model is asked to answer directly.
+
+This keeps the system running, but it means the answer may no longer be grounded in the project’s documents.
+
+This can happen if:
+
+    ChromaDB is unavailable.
+
+    The collection is missing.
+
+    Documents fail to load.
+
+    No relevant documents are found.
+
+    The prompt does not match the document set.
+
+In those cases, the answer depends only on the LLM.
+
+
+
+No Retrieval Evaluation Metrics
+
+The current implementation does not measure retrieval accuracy. It does not calculate metrics such as:
+
+    Precision@K.
+
+    Recall@K.
+
+    Mean Reciprocal Rank.
+
+    Similarity score thresholds.
+
+    Answer faithfulness.
+
+    Context relevance.
+
+Because of this, it is difficult to quantitatively prove how accurate the RAG system is. Testing is mostly manual, using example queries and checking whether the retrieved context seems relevant.
+
+
+
+
+
+    RAG quality depends on the embedded document set.
+
+    The document corpus is limited and domain‑specific.
+
+    Retrieval errors or missing context can still lead to incomplete answers.
+
+    No re‑ranking or cross‑encoder validation is implemented.
+
+
+
+Reflection
+
+Despite these limitations, the system demonstrates the core principles of distributed LLM inference: request routing, autoscaling, failure handling, and separation of concerns. The limitations highlight realistic next steps rather than fundamental design flaws.
+
+11.1 Local Machine and Docker Limitations
+
+11.2 GPU Simulation Limitations
+
+11.3 LLM Model Size Limitations
+
+11.4 Single Master Limitation
+
+11.5 Network and Deployment Limitations
+
+11.6 RAG Accuracy Limitations
+
+
+
+Limitation
+
+
+Impact
+
+
+Possible improvement
+
+Master remains a single controller
+
+
+If it is down, clients cannot access the service.
+
+
+Add persistent state, standby master, or leader election.
+
+Security is minimal
+
+
+HTTP/gRPC traffic is not authenticated in the prototype.
+
+
+Add TLS, service tokens, and role-based access.
+
+GPU scheduling is abstracted
+
+
+The project routes to workers but does not inspect GPU memory directly.
+
+
+Add NVIDIA/DCGM metrics and GPU-aware placement.
+
+RAG scoring is simple
+
+
+Term counting is less accurate than vector similarity in the worker fallback.
+
+
+Use embeddings directly during query or a dedicated retrieval service.
+
+Limited persistence for request state
+
+
+Retries work during one request but long-term recovery is limited.
+
+
+Persist request logs and replayable job state.
+
+No formal benchmark table
+
+
+Performance depends on hardware and local setup.
+
+
+Run controlled benchmarks and record latency percentiles by worker count.
+
+
+
+12. Conclusion
+
+This project demonstrates a practical distributed computing solution for high-concurrency LLM inference. It separates external client access from internal worker execution, uses a master/load balancer to coordinate routing, uses agents to manage worker processes, and uses Python workers to combine RAG with local model inference. The architecture is appropriate for the coursework problem because it applies core distributed-system ideas: component separation, concurrency, scheduling, queueing, monitoring, fault tolerance, and elastic scaling.
+
+ The strongest part of the design is that it treats LLM inference as a cluster workload rather than a single process function call. Requests are tracked, workers have lifecycle states, metrics are smoothed, and autoscaling decisions are based on several signals rather than one raw value. The remaining limitations are realistic for a prototype and provide clear paths for future work, especially master high availability, GPU-aware scheduling, stronger security, and controlled benchmark reporting.
+
+
+
+References
+
+ Tanenbaum, A. S. and Van Steen, M. Distributed Systems: Principles and Paradigms.
+
+ Coulouris, G., Dollimore, J., Kindberg, T., and Blair, G. Distributed Systems: Concepts and Design.
+
+gRPC Documentation. Concepts, deadlines, keepalive, and protocol buffers.
+
+ Docker Documentation. Container lifecycle, networking, labels, and restart policies.
+
+ Chroma Documentation. Vector database concepts and collection/query API.
+
+Ollama Documentation. Local model execution and /api/generate endpoint.
+
+Kleppmann, M. Designing Data-Intensive Applications. O'Reilly Media.
+
+ NVIDIA. GPU monitoring and data center GPU management concepts.
+
+
+
+Appendices
+
+Appendix A: How to Run the Project
+
+
+
+This appendix explains how to run the LLM Cluster Orchestrator locally. The project contains several components: Master, Agent, Worker, Ollama, and ChromaDB. The Master controls the cluster, the Agent manages Worker containers, the Workers process requests, ChromaDB provides retrieval data, and Ollama runs the local LLM.
+
+
+
+ A.1 Prerequisites
+
+Before running the project, install the following tools:
+
+Tool
+
+
+Purpose
+
+Go
+
+
+Runs the Master and Agent services
+
+Python 3.11
+
+
+Runs the Worker code and vector database scripts
+
+Docker
+
+
+Builds and runs Worker and ChromaDB containers
+
+Docker Compose
+
+
+Starts the ChromaDB service
+
+Ollama
+
+
+Runs the local LLM model
+
+Protocol Buffers compiler
+
+
+Generates gRPC code
+
+TUI Client or curl
+
+
+Tests the HTTP API endpoints
+
+The project assumes Docker is running and accessible from the terminal.
+
+
+
+A.2 Project Structure
+
+
+
+After extracting the project, the main folders are:
+
+llm-cluster-orchestrator/
+
+├── master/
+
+├── agent/
+
+├── worker/
+
+├── proto/
+
+├── vector-db/
+
+├── client/
+
+└── docs/
+
+ A.3 Generate gRPC Code
+
+
+
+The project uses Protocol Buffers for Master-to-Worker gRPC communication.
+
+From the root directory, run:
+
+make generate-proto
+
+This generates:
+
+master/generated/
+
+worker/worker_pb2.py
+
+worker/worker_pb2_grpc.py
+
+If only Go code is needed:
+
+make generate-proto-go
+
+
+
+If only Python code is needed:
+
+make generate-proto-python
+
+
+
+---
+
+
+
+ A.4 Build the Worker Docker Image
+
+
+
+The Agent creates Workers from a Docker image. Before running the Agent, build the Worker image:
+
+cd worker
+
+docker build -t llm-worker:latest .
+
+Return to the project root:
+
+cd ..
+
+A.5 Start Ollama
+
+
+
+Start Ollama locally:
+
+
+
+ollama serve
+
+Pull the default model used by the project:
+
+ollama pull smollm:135m
+
+
+
+The Worker uses this model by default:
+
+smollm:135m
+
+
+
+A different model can be used by setting:
+
+OLLAMA_MODEL=<model-name>

@@ -1,0 +1,129 @@
+\documentclass[12pt,a4paper]{article}
+% --- Packages ---------------------------------------------------------------
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{tabularx}
+\definecolor{mysec}{RGB}{47,84,150}
+\definecolor{mysubsec}{RGB}{60,98,165}
+\definecolor{mysubsubsec}{RGB}{75,115,180}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{parskip}
+\usepackage{multirow}
+% --- Code listing style -----------------------------------------------------
+\lstdefinestyle{arduino}{
+  language=C++,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{gray}\itshape,
+  stringstyle=\color{red},
+  numberstyle=\tiny\color{gray},
+  numbers=left,
+  stepnumber=1,
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!8},
+  tabsize=2,
+  captionpos=b
+}
+\lstdefinestyle{matlab}{
+  language=Matlab,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{green!60!black}\itshape,
+  stringstyle=\color{red},
+  numberstyle=\tiny\color{gray},
+  numbers=left,
+  stepnumber=1,
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!8},
+  tabsize=2,
+  captionpos=b
+}
+% --- Header / Footer --------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\setlength{\headheight}{14.5pt}
+\rhead{CSE481 -- Spring 2026}
+\lhead{Position Control of a Geared DC Motor}
+\rfoot{Page \thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+% --- Section formatting -----------------------------------------------------
+\titleformat{\section}{\large\bfseries\color{mysec}}{\thesection.}{0.5em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries\color{mysubsec}}{\thesubsection}{0.5em}{}
+\titleformat{\subsubsection}{\normalsize\itshape\color{mysubsubsec}}{\thesubsubsection}{0.5em}{}
+% --- Hyperlink colours ------------------------------------------------------
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!70!black,
+  urlcolor=blue!70!black
+}
+% ============================================================================
+\begin{document}
+% --- Title Page -------------------------------------------------------------
+\begin{titlepage}
+  \centering
+  \vspace*{1cm}
+  % University logo placeholder
+  \begin{figure}[H]
+    \centering
+    % \includegraphics[width=0.25\textwidth]{asu_logo.png}
+    \fbox{\parbox[c][3cm][c]{4cm}{\centering\textit{[University Logo]}}}
+  \end{figure}
+  \vspace{0.5cm}
+  {\LARGE\bfseries Ain Shams University\\[0.3em]
+   Faculty of Engineering\\[0.3em]
+   Computer and AI Engineering Program\par}
+  \vspace{1cm}
+  \rule{\linewidth}{1pt}\\[0.4em]
+  {\Huge\bfseries Position Control System\\[0.3em]
+   for a Geared DC Motor\par}
+  \rule{\linewidth}{1pt}
+  \vspace{0.8cm}
+  {\large CSE481 -- Control Systems\\
+   Spring Semester 2026\par}
+  \vspace{1.5cm}
+  {\large
+  \begin{tabular*}{0.6\linewidth}{@{\extracolsep{\fill}} l l }
+    \toprule
+    \textbf{Name} & \textbf{ID} \\
+    \midrule
+    El-Sharqawy Wael & 23P0360 \\
+    Youssef Tarek & 23P0177 \\
+    Somaya Ahmed Galal & 22P0139 \\
+    Habiba Sherif Abdelaziz & 22P0162 \\
+    Rowaida Emad Khalaf & 22P0021 \\
+    \bottomrule
+  \end{tabular*}\par}
+  \vfill
+  {\large Submission Date: \today\par}
+\end{titlepage}
+% --- Table of Contents ------------------------------------------------------
+\begingroup
+  \hypersetup{linkcolor=black}
+  \color{black}
+  \tableofcontents
+\endgroup
+\newpage
+
+\input{sections/section_abstract}
+\input{sections/section_1_introduction}
+\input{sections/section_2_background}
+\input{sections/section_3_requirements}
+\input{sections/section_4_system_design}
+\input{sections/section_5_load_balancing}
+\input{sections/section_6_implementation}
+
+\end{document}

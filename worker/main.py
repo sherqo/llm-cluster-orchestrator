@@ -69,8 +69,6 @@ class Worker(worker_pb2_grpc.WorkerServiceServicer):
 
     def Handle(self, request, context):
         #  determine tier from priority (inverted: lower num = higher priority for heapq)
-        # master sends: elite=10000, pro=100, free=50
-        # convert to heapq-friendly: elite=1, pro=2, free=3
         if request.priority >= 1000:
             tier = "elite"
             priority = 1  # highest priority for heapq
@@ -98,14 +96,19 @@ class Worker(worker_pb2_grpc.WorkerServiceServicer):
         print(f"[worker:{WORKER_PORT}] handling  request_id={req_id}")
 
         #  Tier-based config: elite gets RAG + 300 tokens, others get no RAG + 20 tokens
-        use_rag = (tier == "elite")
+        use_rag = tier == "elite"
         num_predict = 300 if tier == "elite" else 20
 
         #  RAG — retrieve relevant context only for elite users
         rag_context = retrieve(message) if use_rag else ""
 
         #  run this worker's private Ollama model instance
-        reply = run_model(prompt=message, context=rag_context, worker_port=WORKER_PORT, num_predict=num_predict)
+        reply = run_model(
+            prompt=message,
+            context=rag_context,
+            worker_port=WORKER_PORT,
+            num_predict=num_predict,
+        )
 
         #  return response + current queue depth (piggybacked)
         depth = self.queue.size()
