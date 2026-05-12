@@ -15,13 +15,13 @@ def get_ollama_url(worker_port: int) -> str:
 def build_prompt(prompt: str, context: str) -> str:
     if context:
         return (
-            f"{prompt}\n"
-            f"keep the answers short\n\n"
-            f"context: {context}\n\n"
+            f"Context: {context}\n\n"
+            f"Question: {prompt}\n\n"
+            f"Answer:"
         )
     return (
-        f"{prompt}\n"
-        f"keep the answers short\n\n"
+        f"Question: {prompt}\n\n"
+        f"Answer:"
     )
 
 

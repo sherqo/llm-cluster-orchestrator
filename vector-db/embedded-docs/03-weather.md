@@ -1,0 +1,1 @@
+Weather is a common topic. People discuss today's weather, forecasts, and how it affects their plans.

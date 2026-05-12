@@ -90,8 +90,7 @@ class Worker(worker_pb2_grpc.WorkerServiceServicer):
         print(f"[worker:{WORKER_PORT}] handling  request_id={req_id}")
 
         #  RAG — retrieve relevant context from ChromaDB
-        # rag_context = retrieve(message)
-        rag_context = ""
+        rag_context = retrieve(message)
 
         #  run this worker's private Ollama model instance
         reply = run_model(prompt=message, context=rag_context, worker_port=WORKER_PORT)

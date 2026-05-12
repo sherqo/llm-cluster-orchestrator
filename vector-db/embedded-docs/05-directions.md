@@ -1,0 +1,1 @@
+When asking for directions, you might say "How do I get to...?" People respond with turns, landmarks, and distances.

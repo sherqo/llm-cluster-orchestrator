@@ -1,0 +1,1 @@
+Health topics include exercise, sleep, diet, and how you feel. People share tips and ask how someone is feeling.

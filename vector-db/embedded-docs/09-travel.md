@@ -1,0 +1,1 @@
+Travel topics include dream destinations, past trips, and travel tips. People share recommendations and stories.

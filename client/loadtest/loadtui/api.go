@@ -27,9 +27,9 @@ func sendChat(ctx context.Context, masterURL, userID, tier, prompt string) (chat
         return chatResponse{}, fmt.Errorf("marshal: %w", err)
     }
 
-    client := &http.Client{Timeout: 180 * time.Second}
-    maxRetries := 10
-    backoff := 100 * time.Millisecond
+	client := &http.Client{Timeout: 10 * time.Minute}
+	maxRetries := 50
+	backoff := 200 * time.Millisecond
 
     var lastErr error
     for attempt := 0; attempt < maxRetries; attempt++ {

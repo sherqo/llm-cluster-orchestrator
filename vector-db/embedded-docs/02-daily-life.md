@@ -1,0 +1,1 @@
+People often talk about their day, work, family, and hobbies. Sharing about your day helps build connections.
