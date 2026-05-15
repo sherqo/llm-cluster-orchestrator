@@ -1,96 +1,125 @@
-# LLM Cluster Orchestrator
+<p align="center">
+  <h1 align="center">⚡ LLM Cluster Orchestrator</h1>
+  <p align="center">
+    Distributed LLM inference system with dynamic load balancing, autoscaling, and fault tolerance.
+  </p>
+  <p align="center">
+    <img src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go" />
+    <img src="https://img.shields.io/badge/Python-3.10+-3776AB?logo=python" />
+    <img src="https://img.shields.io/badge/gRPC-proto-244c5a" />
+    <img src="https://img.shields.io/badge/Ollama-llm-4B32C3" />
+    <img src="https://img.shields.io/badge/ChromaDB-vector-FE7A16" />
+    <img src="https://img.shields.io/badge/license-MIT-blue" />
+  </p>
+</p>
 
-Distributed LLM inference system designed to handle high concurrency with dynamic load balancing, autoscaling, and fault tolerance.
+<br>
+
+<p align="center">
+  <img src="assets/master_tui.png" alt="Master Cluster Monitoring TUI" width="85%"/>
+  <br>
+  <sub><i>Master Cluster Monitoring TUI — real-time worker status, queue depth, and autoscaling metrics</i></sub>
+</p>
+
+<br>
+
+<p align="center">
+  <img src="assets/client_tui.png" alt="Client Chat TUI" width="85%"/>
+  <br>
+  <sub><i>Client Chat TUI — interactive prompt interface with streaming responses</i></sub>
+</p>
+
+<br>
 
 ## Architecture & Stack
 
-The project is built around a Master-Agent-Worker architecture:
+Master-Agent-Worker architecture with a gRPC communication layer:
 
-- **Master & Load Balancer (Go)**: Single source of truth. Maintains worker registries, monitors queue depths, and handles all incoming HTTP requests. Routes requests to workers via gRPC using least-connections or round-robin strategies. Evaluates cluster metrics to autoscale workers dynamically. Also features a built-in TUI for cluster monitoring.
-- **Agent (Go)**: Deployed on each physical machine/node. Dumb executor that connects to the Master. Automatically manages Dockerized worker containers (spawn/kill), monitors host CPU/RAM metrics, and ensures local services like Ollama and ChromaDB are running.
-- **Worker (Python)**: Stateless gRPC server running in a Docker container. Responsible for the actual inference process. Uses **Sentence-Transformers** for embedding queries and looking up context in **ChromaDB** (RAG), then formats the prompt and queries the local **Ollama** model for generation.
-- **Vector Database (ChromaDB)**: Runs in a Docker container, providing read-only access to embedded document chunks for the workers to use in Retrieval-Augmented Generation (RAG).
-- **LLM Inference (Ollama)**: Local LLM runner. By default, the system uses the `smollm:135m` model for fast, local inference.
+- **Master & Load Balancer (Go)** — Single source of truth. Maintains worker registries, monitors queue depths, routes requests via gRPC (least-connections / round-robin), autoscales workers dynamically. Built-in TUI for cluster monitoring.
+- **Agent (Go)** — Deployed per node. Manages Dockerized worker containers (spawn/kill), monitors CPU/RAM, ensures local services (Ollama, ChromaDB) are running.
+- **Worker (Python)** — Stateless gRPC server in Docker. Sentence-Transformers for embeddings, ChromaDB for RAG context retrieval, Ollama for local LLM inference (default: `smollm:135m`).
+- **Vector Database (ChromaDB)** — Docker container providing read-only access to embedded document chunks for RAG.
+- **LLM Inference (Ollama)** — Local LLM runner for fast, private inference.
 
-## Prerequisites & Installation
+## Prerequisites
 
-To run this project locally, you need the following tools installed on your host machine:
+- **Go 1.20+** — [Install](https://go.dev/doc/install)
+- **Python 3.10+** — [Install](https://www.python.org/downloads/)
+- **Docker & Docker Compose** — [Install](https://docs.docker.com/get-docker/)
+- **Ollama** — [Install](https://ollama.com/download)
 
-1. **Go (1.20+)**: Required for the Master and Agent. [Install Go](https://go.dev/doc/install).
-2. **Python (3.10+)**: Required for client scripts. [Install Python](https://www.python.org/downloads/).
-3. **Docker & Docker Compose**: Required for running Worker containers and ChromaDB. [Install Docker](https://docs.docker.com/get-docker/).
-4. **Ollama**: Required for running the actual LLM models locally. [Install Ollama](https://ollama.com/download).
-
-## Quick Start (Local Run)
-
-This is the exact sequence to bring up the entire stack on a single machine.
+## Quick Start
 
 ### 1. One-time Setup
 
-First, build the Python worker Docker image:
 ```bash
+# Build the worker Docker image
 docker build -t llm-worker:latest ./worker
-```
 
-Next, pre-pull the default Ollama model to save time during runtime:
-```bash
+# Pre-pull the default Ollama model
 ollama pull smollm:135m
 ```
 
-*(Note: The `worker` image already includes the necessary Python dependencies for gRPC and Sentence-Transformers.)*
-
 ### 2. Start the Master
 
-The Master handles HTTP requests and orchestrates the cluster.
 ```bash
 cd master
-go run .
+go run .                   # Listens on http://127.0.0.1:8080
 ```
-*The master will start listening on `http://127.0.0.1:8080` and launch a Terminal UI (TUI) for monitoring.*
 
 ### 3. Start the Agent
 
-Open a **new terminal tab/window** and start the local agent:
 ```bash
 cd agent
 go run . --master-url http://127.0.0.1:8080
 ```
 
-The agent will automatically:
-- Start Ollama if it is not already running.
-- Start ChromaDB via `docker-compose` in the `vector-db/` directory.
-- Register itself with the master.
-- Spawn an initial worker container to handle requests.
+The agent automatically starts Ollama, launches ChromaDB via docker-compose, registers with the master, and spawns an initial worker.
 
-### 4. Send a Test Request
+### 4. Test the System
 
-Once the worker is registered (visible in the Master's TUI), you can test the system:
 ```bash
 curl -X POST http://127.0.0.1:8080/chat \
   -H "Content-Type: application/json" \
   -d '{"userId":"u1","prompt":"What is the battle of stalingrad?","tier":"free"}'
 ```
 
-## Advanced Usage & Load Testing
+## Advanced Usage
 
-### Multi-Agent / Multi-Node
-You can launch multiple agents on different machines. Make sure to point them to the master node's IP:
+### Multi-Node Deployment
+
+Launch agents on different machines pointing to the master:
+
 ```bash
 cd agent
 go run . --master-url http://<MASTER_IP>:8080
 ```
-Alternatively, for local simulation on Linux, you can run `scripts/run-linux.sh` to spawn multiple local agents with isolated Ollama ports.
+
+For local multi-agent simulation on Linux: `scripts/run-linux.sh`
 
 ### Load Testing
-The `scripts/` directory contains various load testing tools:
-- **Simple 1000-request load**: `./scripts/stress_test.sh`
-- **Gradual stress test (phased bursts)**: `./scripts/gradual_stress_test.sh`
-- **Configurable sweep with JSON output**: `./scripts/run_load_sweep.sh results/run1`
-- **Go Client Loadtest**: `go run ./client/loadtest/main.go -master-url http://localhost:8080 -user-id load-1`
+
+- **Simple 1000-request load:** `./scripts/stress_test.sh`
+- **Gradual stress test (phased bursts):** `./scripts/gradual_stress_test.sh`
+- **Configurable sweep with JSON output:** `./scripts/run_load_sweep.sh results/run1`
+- **Go Client Loadtest:** `go run ./client/loadtest/main.go -master-url http://localhost:8080 -user-id load-1`
 
 ## Troubleshooting
 
-- **Chroma Build Fails**: Verify the Docker daemon is running (`docker info`).
-- **Connection Refused on Chat**: Verify Ollama is running successfully on your host: `curl http://127.0.0.1:11434/api/tags`.
-- **Model Not Found**: Ensure you pulled the model before running: `ollama pull smollm:135m`.
-- **Worker Fails to Register**: Check the Master TUI logs or Agent logs to ensure the worker container started successfully and can reach the Master's IP.
+| Issue | Check |
+|-------|-------|
+| Chroma build fails | `docker info` — Docker daemon must be running |
+| Connection refused on chat | `curl http://127.0.0.1:11434/api/tags` — Ollama must be running |
+| Model not found | `ollama pull smollm:135m` — pull the model first |
+| Worker fails to register | Check Master TUI logs or Agent logs |
+
+## Components
+
+| Component | Language | Path |
+|-----------|----------|------|
+| Master | Go | `master/` |
+| Agent | Go | `agent/` |
+| Worker | Python | `worker/` |
+| Client | Go | `client/` |
+| Protobuf | Proto3 | `proto/` |
+| Vector DB | Docker | `vector-db/` |
